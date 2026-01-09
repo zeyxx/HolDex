@@ -1,3 +1,15 @@
+# ═══════════════════════════════════════════════════════════════
+# HolDex Infrastructure Blueprint
+# Your own database + services
+# ═══════════════════════════════════════════════════════════════
+
+databases:
+  # Your PostgreSQL database (not sollama58's)
+  - name: holdex-db
+    plan: starter  # $7/mo - 1GB storage, 97 connections
+    region: oregon
+    postgresMajorVersion: 16
+
 services:
   # Web Service - API + Frontend
   - type: web
@@ -12,7 +24,9 @@ services:
     startCommand: npm start
     envVars:
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: holdex-db
+          property: connectionString
       - key: HELIUS_API_KEY
         sync: false
       - key: REDIS_URL
@@ -35,6 +49,8 @@ services:
     startCommand: npm run calculator
     envVars:
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: holdex-db
+          property: connectionString
       - key: HELIUS_API_KEY
         sync: false

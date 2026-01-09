@@ -72,10 +72,24 @@ async function queueNewToken(mint, source = 'unknown') {
  */
 async function processToken(mint) {
     const redis = getClient();
-    const db = getDB();
-    const connection = getSolanaConnection();
+    if (!redis) {
+        logger.warn(`[TokenQueue] Cannot process ${mint.slice(0, 8)} - Redis not available`);
+        return false;
+    }
 
-    if (!redis || !db) return false;
+    let db, connection;
+    try {
+        db = getDB();
+        connection = getSolanaConnection();
+    } catch (initErr) {
+        logger.error(`[TokenQueue] Service init failed for ${mint.slice(0, 8)}: ${initErr.message}`);
+        return false;
+    }
+
+    if (!db) {
+        logger.warn(`[TokenQueue] Cannot process ${mint.slice(0, 8)} - DB not available`);
+        return false;
+    }
 
     try {
         // Get queue data
@@ -160,33 +174,44 @@ async function processToken(mint) {
  * Process tokens from the queue
  */
 async function processQueue() {
-    if (isProcessing) return;
+    if (isProcessing) {
+        logger.debug('[TokenQueue] Skipping - already processing');
+        return;
+    }
     isProcessing = true;
 
     const redis = getClient();
     if (!redis) {
+        logger.warn('[TokenQueue] Redis not available, skipping');
         isProcessing = false;
         return;
     }
 
     try {
-        // Get tokens to process (up to 5 at a time)
-        const tokens = await redis.smembers(QUEUE_KEY);
+        // Use SRANDMEMBER instead of SMEMBERS to avoid loading 10,000+ tokens into memory
+        // This is O(count) vs O(n) for large sets
+        const tokens = await redis.srandmember(QUEUE_KEY, 5);
 
-        if (tokens.length === 0) {
+        if (!tokens || tokens.length === 0) {
+            // No tokens to process - this is normal
             isProcessing = false;
             return;
         }
 
-        logger.info(`📋 [TokenQueue] Processing ${tokens.length} queued token(s)`);
+        logger.info(`📋 [TokenQueue] Processing batch of ${tokens.length} token(s)`);
 
-        // Process in batches with delay between each
-        for (const mint of tokens.slice(0, 5)) {
-            await processToken(mint);
+        // Process batch with delay between each
+        for (const mint of tokens) {
+            try {
+                await processToken(mint);
+            } catch (tokenErr) {
+                logger.error(`[TokenQueue] Token error ${mint.slice(0, 8)}: ${tokenErr.message}`);
+            }
             await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
         }
     } catch (err) {
         logger.error(`[TokenQueue] Queue processing error: ${err.message}`);
+        logger.error(err.stack);
     } finally {
         isProcessing = false;
     }

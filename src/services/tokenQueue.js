@@ -100,9 +100,26 @@ async function processToken(mint) {
         await redis.smove(QUEUE_KEY, PROCESSING_KEY, mint);
 
         logger.info(`🔄 [TokenQueue] Processing ${mint.slice(0, 8)} (attempt ${data.retries + 1}/${MAX_RETRIES})`);
+        processorStats.lastToken = mint.slice(0, 8);
 
-        // Fetch metadata
-        const meta = await fetchTokenMetadata(mint);
+        // Fetch metadata with timeout (10s max)
+        const METADATA_TIMEOUT = 10000;
+        let meta = null;
+        try {
+            const metaPromise = fetchTokenMetadata(mint);
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Metadata fetch timeout')), METADATA_TIMEOUT)
+            );
+            meta = await Promise.race([metaPromise, timeoutPromise]);
+        } catch (metaErr) {
+            logger.warn(`[TokenQueue] Metadata error for ${mint.slice(0, 8)}: ${metaErr.message}`);
+            processorStats.metadataErrors = (processorStats.metadataErrors || 0) + 1;
+            // Move back to queue for retry
+            await redis.smove(PROCESSING_KEY, QUEUE_KEY, mint);
+            data.retries++;
+            await redis.hset('holdex:queue_data', mint, JSON.stringify(data));
+            return false;
+        }
 
         // Check if we got real metadata (not placeholder)
         const hasRealName = meta && meta.name && meta.name !== 'Unknown' && meta.name !== 'New Discovery' && meta.name.length > 0;
@@ -224,6 +241,8 @@ const processorStats = {
     lastRun: 0,
     runsCount: 0,
     tokensProcessed: 0,
+    metadataErrors: 0,
+    lastToken: null,
     errors: []
 };
 

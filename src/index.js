@@ -481,6 +481,11 @@ async function startServer() {
         // PriceWorker: Unified price service (Jupiter + Raydium, 0 Helius credits)
         startPriceWorker({ db: getDB(), broadcast: null });
 
+        // Token Catchup: Fallback discovery via GeckoTerminal/DexScreener polling
+        // $asdfasdfa Philosophy: "Don't trust, verify" - webhooks can fail
+        const { startCatchup } = require('./tasks/tokenCatchup');
+        startCatchup();
+
         // ARCHITECTURE FIX: kScoreUpdater.start() REMOVED from API
         // K-Score periodic calculations run ONLY on Calculator service to prevent race conditions.
         // API still has access to updateSingleToken() for on-demand recalcs (admin, approvals, etc.)

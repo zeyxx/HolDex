@@ -145,27 +145,52 @@ async function indexTokenOnChain(mint, retryCount = 0) {
         const db = getDB();
         logger.info(`🔍 [Indexer] Starting indexing for ${mint.slice(0, 8)}...${retryCount > 0 ? ` (retry ${retryCount})` : ''}`);
 
-        let meta = await fetchTokenMetadata(mint);
+        // ═══════════════════════════════════════════════════════════════
+        // OPTIMIZATION: Skip metadata fetch if token already has real data
+        // This prevents double-fetch when called from tokenQueue
+        // (tokenQueue already fetched and inserted metadata)
+        // ═══════════════════════════════════════════════════════════════
+        const existing = await db.get(
+            'SELECT name, symbol, image FROM tokens WHERE mint = $1',
+            [mint]
+        );
 
-        // For brand new tokens, metadata might not be indexed yet - retry with delay
-        const MAX_RETRIES = 3;
-        const RETRY_DELAY_MS = 2000;
+        let meta;
+        const existingHasRealName = existing && existing.name &&
+            existing.name !== 'Unknown' && existing.name !== 'New Discovery' &&
+            !existing.name.startsWith('Token ') && existing.name.length > 0;
+        const existingHasRealSymbol = existing && existing.symbol &&
+            existing.symbol !== 'UNK' && existing.symbol !== 'UNKNOWN' &&
+            existing.symbol !== 'NEW' && existing.symbol.length > 0;
 
-        // Check if we got real metadata (not placeholder)
-        const hasRealName = meta && meta.name && meta.name !== 'Unknown' && meta.name !== 'New Discovery' && meta.name.length > 0;
-        const hasRealSymbol = meta && meta.symbol && meta.symbol !== 'UNK' && meta.symbol !== 'UNKNOWN';
+        if (existingHasRealName && existingHasRealSymbol) {
+            // Token already has real metadata - reuse it (saves 1 RPC call)
+            meta = { name: existing.name, symbol: existing.symbol, image: existing.image };
+            logger.info(`♻️ [Indexer] Reusing existing metadata for ${mint.slice(0, 8)}`);
+        } else {
+            // Need to fetch metadata (new token or placeholder data)
+            meta = await fetchTokenMetadata(mint);
 
-        if ((!hasRealName || !hasRealSymbol) && retryCount < MAX_RETRIES) {
-            logger.info(`⏳ [Indexer] Metadata not ready for ${mint.slice(0, 8)} (name: ${meta?.name}, symbol: ${meta?.symbol}), will retry in ${RETRY_DELAY_MS}ms...`);
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
-            return indexTokenOnChain(mint, retryCount + 1);
-        }
+            // For brand new tokens, metadata might not be indexed yet - retry with delay
+            const MAX_RETRIES = 3;
+            const RETRY_DELAY_MS = 2000;
 
-        // If still no valid metadata after retries, DO NOT add token to database
-        // We only want tokens with real metadata - no placeholders like "New Discovery"
-        if (!hasRealName || !hasRealSymbol) {
-            logger.warn(`⚠️ [Indexer] Skipping ${mint.slice(0, 8)} - no valid metadata after ${MAX_RETRIES} retries (name: ${meta?.name}, symbol: ${meta?.symbol})`);
-            return { name: null, ticker: null, pairs: [], skipped: true, reason: 'no_metadata' };
+            // Check if we got real metadata (not placeholder)
+            const hasRealName = meta && meta.name && meta.name !== 'Unknown' && meta.name !== 'New Discovery' && meta.name.length > 0;
+            const hasRealSymbol = meta && meta.symbol && meta.symbol !== 'UNK' && meta.symbol !== 'UNKNOWN';
+
+            if ((!hasRealName || !hasRealSymbol) && retryCount < MAX_RETRIES) {
+                logger.info(`⏳ [Indexer] Metadata not ready for ${mint.slice(0, 8)} (name: ${meta?.name}, symbol: ${meta?.symbol}), will retry in ${RETRY_DELAY_MS}ms...`);
+                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+                return indexTokenOnChain(mint, retryCount + 1);
+            }
+
+            // If still no valid metadata after retries, DO NOT add token to database
+            // We only want tokens with real metadata - no placeholders like "New Discovery"
+            if (!hasRealName || !hasRealSymbol) {
+                logger.warn(`⚠️ [Indexer] Skipping ${mint.slice(0, 8)} - no valid metadata after ${MAX_RETRIES} retries (name: ${meta?.name}, symbol: ${meta?.symbol})`);
+                return { name: null, ticker: null, pairs: [], skipped: true, reason: 'no_metadata' };
+            }
         }
 
         logger.info(`📝 [Indexer] Metadata: ${meta.name} (${meta.symbol})`);

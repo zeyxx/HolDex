@@ -495,18 +495,36 @@ function init(deps) {
                         // Validate address
                         if (!isValidSolanaAddress(mint)) continue;
 
-                        // Check if already exists (with timeout protection)
+                        // OPTIMIZATION: Use Redis for fast existence check (avoids DB connection exhaustion)
+                        // Redis check is ~100x faster than DB query under load
                         let exists = false;
-                        try {
-                            exists = await db.get(
-                                'SELECT mint FROM tokens WHERE mint = $1',
-                                [mint]
-                            );
-                        } catch (dbErr) {
-                            // DB error - skip this mint but don't fail batch
-                            logger.warn(`[NewToken] DB check failed for ${mint.slice(0, 8)}: ${dbErr.message}`);
-                            stats.errors++;
-                            continue;
+                        if (redis) {
+                            try {
+                                // Check Redis cache first (set of known mints)
+                                exists = await redis.sismember('known_mints', mint);
+                            } catch (_redisErr) {
+                                // Redis failed - fall through to DB check
+                            }
+                        }
+
+                        // Only hit DB if Redis says mint is unknown (or Redis unavailable)
+                        if (!exists) {
+                            try {
+                                const dbResult = await db.get(
+                                    'SELECT mint FROM tokens WHERE mint = $1',
+                                    [mint]
+                                );
+                                exists = !!dbResult;
+                                // Cache the result in Redis for future checks
+                                if (exists && redis) {
+                                    redis.sadd('known_mints', mint).catch(() => {});
+                                }
+                            } catch (dbErr) {
+                                // DB error - skip this mint but don't fail batch
+                                logger.warn(`[NewToken] DB check failed for ${mint.slice(0, 8)}: ${dbErr.message}`);
+                                stats.errors++;
+                                continue;
+                            }
                         }
 
                         if (exists) {

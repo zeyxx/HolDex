@@ -495,7 +495,33 @@ async function initDB() {
                 `ALTER TABLE operation_costs RENAME COLUMN operation TO operation_type`,
                 `ALTER TABLE operation_costs RENAME COLUMN infrastructure_cost TO actual_cost`,
                 `ALTER TABLE operation_costs ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`,
-                // Harmony: Fix participants schema if old version exists (add missing columns)
+                // Harmony: Fix participants schema - rename old columns to new names
+                // These run safely - column might not exist (OK) or already renamed (OK)
+                `DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_escore')
+                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='e_score')
+                    THEN ALTER TABLE participants RENAME COLUMN cached_escore TO e_score;
+                    END IF;
+                END $$`,
+                `DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_tier')
+                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='tier')
+                    THEN ALTER TABLE participants RENAME COLUMN cached_tier TO tier;
+                    END IF;
+                END $$`,
+                `DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_tier_icon')
+                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='tier_icon')
+                    THEN ALTER TABLE participants RENAME COLUMN cached_tier_icon TO tier_icon;
+                    END IF;
+                END $$`,
+                `DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='escore_updated_at')
+                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='e_score_updated_at')
+                    THEN ALTER TABLE participants RENAME COLUMN escore_updated_at TO e_score_updated_at;
+                    END IF;
+                END $$`,
+                // Harmony: Add missing columns (for fresh installs or post-rename)
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS holdings DOUBLE PRECISION DEFAULT 0`,
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS api_calls_30d INTEGER DEFAULT 0`,
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS apps_live INTEGER DEFAULT 0`,

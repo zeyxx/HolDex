@@ -483,47 +483,67 @@ function init(deps) {
                 }
 
                 // ══════════════════════════════════════════════════════════════
-                // PROCESS EACH MINT
+                // PROCESS EACH MINT (with error isolation)
                 // ══════════════════════════════════════════════════════════════
                 for (const mint of mints) {
-                    // Validate address
-                    if (!isValidSolanaAddress(mint)) continue;
+                    try {
+                        // Validate address
+                        if (!isValidSolanaAddress(mint)) continue;
 
-                    // Check if already exists
-                    const exists = await db.get(
-                        'SELECT mint FROM tokens WHERE mint = $1',
-                        [mint]
-                    );
-
-                    if (exists) {
-                        skipped++;
-                        continue;
-                    }
-
-                    // ══════════════════════════════════════════════════════════
-                    // NEW TOKEN DISCOVERED!
-                    // ══════════════════════════════════════════════════════════
-                    logger.info(`✨ [${source}] New token: ${mint}`);
-                    stats.tokensDiscovered++;
-                    discovered++;
-
-                    // Queue for rate-limited processing (prevents API floods)
-                    // tokenQueue.js will fetch real metadata THEN insert to DB
-                    // DO NOT insert placeholder here - it would cause queueNewToken to skip
-                    const queued = await queueNewToken(mint, source);
-                    if (!queued) {
-                        logger.debug(`[NewToken] ${mint.slice(0, 8)} already queued or processing`);
-                    }
-
-                    // Add to grower scanner queue
-                    if (redis) {
+                        // Check if already exists (with timeout protection)
+                        let exists = false;
                         try {
-                            await redis.sadd('pending_growers', JSON.stringify({
-                                mint,
-                                addedAt: Date.now(),
-                                source
-                            }));
-                        } catch (_e) { /* ignore */ }
+                            exists = await db.get(
+                                'SELECT mint FROM tokens WHERE mint = $1',
+                                [mint]
+                            );
+                        } catch (dbErr) {
+                            // DB error - skip this mint but don't fail batch
+                            logger.warn(`[NewToken] DB check failed for ${mint.slice(0, 8)}: ${dbErr.message}`);
+                            stats.errors++;
+                            continue;
+                        }
+
+                        if (exists) {
+                            skipped++;
+                            continue;
+                        }
+
+                        // ══════════════════════════════════════════════════════════
+                        // NEW TOKEN DISCOVERED!
+                        // ══════════════════════════════════════════════════════════
+                        logger.info(`✨ [${source}] New token: ${mint}`);
+                        stats.tokensDiscovered++;
+                        discovered++;
+
+                        // Queue for rate-limited processing (prevents API floods)
+                        // tokenQueue.js will fetch real metadata THEN insert to DB
+                        // DO NOT insert placeholder here - it would cause queueNewToken to skip
+                        try {
+                            const queued = await queueNewToken(mint, source);
+                            if (!queued) {
+                                logger.debug(`[NewToken] ${mint.slice(0, 8)} already queued or processing`);
+                            }
+                        } catch (queueErr) {
+                            logger.warn(`[NewToken] Queue failed for ${mint.slice(0, 8)}: ${queueErr.message}`);
+                            // Don't increment errors here - token was still discovered
+                        }
+
+                        // Add to grower scanner queue
+                        if (redis) {
+                            try {
+                                await redis.sadd('pending_growers', JSON.stringify({
+                                    mint,
+                                    addedAt: Date.now(),
+                                    source
+                                }));
+                            } catch (_e) { /* ignore */ }
+                        }
+                    } catch (mintErr) {
+                        // Catch-all for any unexpected error processing this mint
+                        logger.warn(`[NewToken] Mint processing error ${mint.slice(0, 8)}: ${mintErr.message}`);
+                        stats.errors++;
+                        // Continue processing other mints
                     }
                 }
             }
@@ -538,8 +558,9 @@ function init(deps) {
             });
 
         } catch (error) {
+            // Only reaches here for catastrophic errors (parse failure, etc.)
             stats.errors++;
-            logger.error(`[NewToken] Error: ${error.message}`);
+            logger.error(`[NewToken] Batch error: ${error.message}`);
             res.status(500).json({ error: sanitizeError(error) });
         }
     });
@@ -550,6 +571,35 @@ function init(deps) {
      */
     router.get('/new-tokens/stats', (_req, res) => {
         res.json(newTokenWebhook.getStatsCopy());
+    });
+
+    /**
+     * GET /webhook/queue/stats
+     * Get token queue statistics for monitoring
+     */
+    router.get('/queue/stats', async (_req, res) => {
+        try {
+            const { getQueueStats } = require('../services/tokenQueue');
+            const queueStats = await getQueueStats();
+
+            if (!queueStats) {
+                return res.json({
+                    available: false,
+                    message: 'Redis not connected'
+                });
+            }
+
+            res.json({
+                available: true,
+                queue: queueStats,
+                timestamp: Date.now()
+            });
+        } catch (err) {
+            res.status(500).json({
+                available: false,
+                error: err.message
+            });
+        }
     });
 
     /**

@@ -156,6 +156,14 @@ async function listWebhooks() {
 async function updateWebhook(webhookId) {
     logger.info(`[NewTokenWebhook] Updating webhook ${webhookId} with new programs...`);
 
+    // First, get existing webhook details (Helius PUT requires all fields)
+    const getResponse = await fetchWithTimeout(getWebhookApiUrl(`/${webhookId}`));
+    if (!getResponse.ok) {
+        const error = await getResponse.text();
+        throw new Error(`Failed to get webhook: ${error}`);
+    }
+    const existing = await getResponse.json();
+
     const monitoredPrograms = [
         PROGRAMS.PUMP_FUN,
         PROGRAMS.PUMP_AMM,
@@ -168,12 +176,16 @@ async function updateWebhook(webhookId) {
         PROGRAMS.RAYDIUM_CLMM,
     ];
 
+    // Helius PUT requires all fields - merge with existing
     const response = await fetchWithTimeout(getWebhookApiUrl(`/${webhookId}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+            webhookURL: existing.webhookURL,
+            webhookType: existing.webhookType,
             accountAddresses: monitoredPrograms,
             transactionTypes: NEW_TOKEN_TX_TYPES,
+            encoding: existing.encoding || 'jsonParsed',
         })
     });
 
@@ -185,6 +197,7 @@ async function updateWebhook(webhookId) {
 
     const data = await response.json();
     logger.info(`[NewTokenWebhook] Updated! Now monitoring ${monitoredPrograms.length} programs`);
+    logger.info(`[NewTokenWebhook] Programs: ${Object.keys(PROGRAMS).join(', ')}`);
     return data;
 }
 

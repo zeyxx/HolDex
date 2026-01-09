@@ -495,30 +495,48 @@ async function initDB() {
                 `ALTER TABLE operation_costs RENAME COLUMN operation TO operation_type`,
                 `ALTER TABLE operation_costs RENAME COLUMN infrastructure_cost TO actual_cost`,
                 `ALTER TABLE operation_costs ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`,
-                // Harmony: Fix participants schema - rename old columns to new names
-                // These run safely - column might not exist (OK) or already renamed (OK)
+                // Harmony: Fix participants schema - handle column rename/copy scenarios
+                // Scenario 1: Old column exists, new doesn't → RENAME
+                // Scenario 2: Both exist → COPY data then DROP old
+                // Scenario 3: Only new exists → Nothing to do
                 `DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_escore')
-                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='e_score')
-                    THEN ALTER TABLE participants RENAME COLUMN cached_escore TO e_score;
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_escore') THEN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='e_score') THEN
+                            ALTER TABLE participants RENAME COLUMN cached_escore TO e_score;
+                        ELSE
+                            UPDATE participants SET e_score = COALESCE(cached_escore, e_score) WHERE cached_escore IS NOT NULL AND cached_escore > 0;
+                            ALTER TABLE participants DROP COLUMN cached_escore;
+                        END IF;
                     END IF;
                 END $$`,
                 `DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_tier')
-                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='tier')
-                    THEN ALTER TABLE participants RENAME COLUMN cached_tier TO tier;
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_tier') THEN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='tier') THEN
+                            ALTER TABLE participants RENAME COLUMN cached_tier TO tier;
+                        ELSE
+                            UPDATE participants SET tier = COALESCE(cached_tier, tier) WHERE cached_tier IS NOT NULL AND cached_tier != '';
+                            ALTER TABLE participants DROP COLUMN cached_tier;
+                        END IF;
                     END IF;
                 END $$`,
                 `DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_tier_icon')
-                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='tier_icon')
-                    THEN ALTER TABLE participants RENAME COLUMN cached_tier_icon TO tier_icon;
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='cached_tier_icon') THEN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='tier_icon') THEN
+                            ALTER TABLE participants RENAME COLUMN cached_tier_icon TO tier_icon;
+                        ELSE
+                            UPDATE participants SET tier_icon = COALESCE(cached_tier_icon, tier_icon) WHERE cached_tier_icon IS NOT NULL AND cached_tier_icon != '';
+                            ALTER TABLE participants DROP COLUMN cached_tier_icon;
+                        END IF;
                     END IF;
                 END $$`,
                 `DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='escore_updated_at')
-                    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='e_score_updated_at')
-                    THEN ALTER TABLE participants RENAME COLUMN escore_updated_at TO e_score_updated_at;
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='escore_updated_at') THEN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='participants' AND column_name='e_score_updated_at') THEN
+                            ALTER TABLE participants RENAME COLUMN escore_updated_at TO e_score_updated_at;
+                        ELSE
+                            UPDATE participants SET e_score_updated_at = COALESCE(escore_updated_at, e_score_updated_at) WHERE escore_updated_at IS NOT NULL;
+                            ALTER TABLE participants DROP COLUMN escore_updated_at;
+                        END IF;
                     END IF;
                 END $$`,
                 // Harmony: Add missing columns (for fresh installs or post-rename)

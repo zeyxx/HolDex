@@ -7,6 +7,7 @@ services:
     region: oregon
     repo: https://github.com/zeyxx/HolDex
     branch: main
+    autoDeploy: true
     buildCommand: npm install --ignore-optional
     startCommand: npm start
     envVars:
@@ -29,6 +30,7 @@ services:
     region: oregon
     repo: https://github.com/zeyxx/HolDex
     branch: main
+    autoDeploy: true
     buildCommand: npm install --ignore-optional
     startCommand: npm run calculator
     envVars:

@@ -584,6 +584,63 @@ function init(deps) {
         }
     });
 
+    /**
+     * PUT /webhook/new-tokens/update/:webhookId
+     * Update existing webhook with new launchpad programs (Solana 2026)
+     * Requires admin authentication
+     *
+     * Programs added:
+     *   - Pump.fun, PumpSwap AMM
+     *   - Raydium V4, LaunchLab, CLMM
+     *   - Meteora DBC, DLMM
+     *   - Moonshot, Orca Whirlpool
+     */
+    router.put('/new-tokens/update/:webhookId', async (req, res) => {
+        try {
+            const adminKey = req.headers['x-admin-key'];
+            if (adminKey !== config.ADMIN_KEY) {
+                return res.status(401).json({ error: 'Admin access required' });
+            }
+
+            const { webhookId } = req.params;
+            if (!webhookId) {
+                return res.status(400).json({ error: 'webhookId required' });
+            }
+
+            await newTokenWebhook.updateWebhook(webhookId);
+
+            res.json({
+                success: true,
+                webhookId,
+                monitoring: Object.keys(newTokenWebhook.PROGRAMS),
+                programCount: Object.keys(newTokenWebhook.PROGRAMS).length,
+                transactionTypes: newTokenWebhook.NEW_TOKEN_TX_TYPES
+            });
+        } catch (error) {
+            logger.error(`[NewToken] Update failed: ${error.message}`);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * GET /webhook/new-tokens/list
+     * List all Helius webhooks (admin only)
+     */
+    router.get('/new-tokens/list', async (req, res) => {
+        try {
+            const adminKey = req.headers['x-admin-key'];
+            if (adminKey !== config.ADMIN_KEY) {
+                return res.status(401).json({ error: 'Admin access required' });
+            }
+
+            const webhooks = await newTokenWebhook.listWebhooks();
+            res.json({ success: true, webhooks });
+        } catch (error) {
+            logger.error(`[NewToken] List failed: ${error.message}`);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
     return router;
 }
 

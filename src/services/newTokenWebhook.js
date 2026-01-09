@@ -151,6 +151,44 @@ async function listWebhooks() {
 }
 
 /**
+ * Mettre à jour un webhook existant avec les nouveaux programmes
+ */
+async function updateWebhook(webhookId) {
+    logger.info(`[NewTokenWebhook] Updating webhook ${webhookId} with new programs...`);
+
+    const monitoredPrograms = [
+        PROGRAMS.PUMP_FUN,
+        PROGRAMS.PUMP_AMM,
+        PROGRAMS.RAYDIUM_V4,
+        PROGRAMS.RAYDIUM_LAUNCHLAB,
+        PROGRAMS.METEORA_DBC,
+        PROGRAMS.METEORA_DLMM,
+        PROGRAMS.MOONSHOT,
+        PROGRAMS.ORCA_WHIRLPOOL,
+        PROGRAMS.RAYDIUM_CLMM,
+    ];
+
+    const response = await fetchWithTimeout(getWebhookApiUrl(`/${webhookId}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            accountAddresses: monitoredPrograms,
+            transactionTypes: NEW_TOKEN_TX_TYPES,
+        })
+    });
+
+    if (!response.ok) {
+        const error = await response.text();
+        logger.error(`[NewTokenWebhook] Update failed: ${error}`);
+        throw new Error(`Webhook update failed: ${error}`);
+    }
+
+    const data = await response.json();
+    logger.info(`[NewTokenWebhook] Updated! Now monitoring ${monitoredPrograms.length} programs`);
+    return data;
+}
+
+/**
  * Supprimer un webhook
  */
 async function deleteWebhook(webhookId) {
@@ -351,6 +389,7 @@ module.exports = {
     createNewTokenWebhook,
     getOrCreateNewTokenWebhook,
     listWebhooks,
+    updateWebhook,
     deleteWebhook,
 
     // Event processing

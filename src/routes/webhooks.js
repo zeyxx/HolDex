@@ -560,8 +560,8 @@ function init(deps) {
     router.post('/new-tokens/setup', async (req, res) => {
         try {
             // Simple admin check (should be more robust in production)
-            const adminKey = req.headers['x-admin-key'];
-            if (adminKey !== config.ADMIN_KEY) {
+            const adminKey = req.headers['x-admin-password'];
+            if (adminKey !== config.ADMIN_PASSWORD) {
                 return res.status(401).json({ error: 'Admin access required' });
             }
 
@@ -597,8 +597,8 @@ function init(deps) {
      */
     router.put('/new-tokens/update/:webhookId', async (req, res) => {
         try {
-            const adminKey = req.headers['x-admin-key'];
-            if (adminKey !== config.ADMIN_KEY) {
+            const adminKey = req.headers['x-admin-password'];
+            if (adminKey !== config.ADMIN_PASSWORD) {
                 return res.status(401).json({ error: 'Admin access required' });
             }
 
@@ -628,8 +628,8 @@ function init(deps) {
      */
     router.get('/new-tokens/list', async (req, res) => {
         try {
-            const adminKey = req.headers['x-admin-key'];
-            if (adminKey !== config.ADMIN_KEY) {
+            const adminKey = req.headers['x-admin-password'];
+            if (adminKey !== config.ADMIN_PASSWORD) {
                 return res.status(401).json({ error: 'Admin access required' });
             }
 

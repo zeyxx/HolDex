@@ -44,7 +44,8 @@ const oracleRateLimiter = rateLimit({
             return `apikey:${apiKey}`;
         }
         return req.headers['x-forwarded-for'] || req.ip;
-    }
+    },
+    validate: { ipKeyGenerator: false }
 });
 
 // Stricter rate limit for write operations (webhooks, registration)
@@ -57,7 +58,8 @@ const writeRateLimiter = rateLimit({
         success: false,
         error: 'Too many write requests. Please slow down.'
     },
-    keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip
+    keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip,
+    validate: { ipKeyGenerator: false }
 });
 
 // ═══════════════════════════════════════════════════════════════

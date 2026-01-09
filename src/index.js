@@ -209,11 +209,12 @@ app.use(express.json({ limit: '100kb' }));
 // RATE LIMITING
 app.set('trust proxy', 1);
 const limiter = rateLimit({
-    windowMs: 1 * 60 * 1000, 
-    max: 500, 
+    windowMs: 1 * 60 * 1000,
+    max: 500,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req, _res) => req.headers['x-forwarded-for'] || req.ip
+    keyGenerator: (req, _res) => req.headers['x-forwarded-for'] || req.ip,
+    validate: { ipKeyGenerator: false }
 });
 app.use(limiter);
 

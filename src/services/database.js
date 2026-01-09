@@ -224,11 +224,15 @@ async function initDB() {
                     nodes_active INTEGER DEFAULT 0,                -- Infrastructure nodes running
                     referrals_active INTEGER DEFAULT 0,            -- Active referrals
 
-                    -- Cached E-Score (recalculated on demand)
-                    cached_escore DOUBLE PRECISION DEFAULT 0,
-                    cached_tier TEXT DEFAULT 'Newcomer',
-                    cached_tier_icon TEXT DEFAULT '🌱',
-                    escore_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    -- E-Score (recalculated on demand)
+                    -- Column names MUST match harmonyEngine.js: e_score, tier, tier_icon
+                    e_score DOUBLE PRECISION DEFAULT 0,
+                    tier TEXT DEFAULT 'Newcomer',
+                    tier_icon TEXT DEFAULT '🌱',
+                    e_score_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                    -- Rewards tracking
+                    rewards_lifetime DOUBLE PRECISION DEFAULT 0,
 
                     -- Timestamps
                     first_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -497,10 +501,11 @@ async function initDB() {
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS apps_live INTEGER DEFAULT 0`,
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS nodes_active INTEGER DEFAULT 0`,
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS referrals_active INTEGER DEFAULT 0`,
-                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS cached_escore DOUBLE PRECISION DEFAULT 0`,
-                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS cached_tier TEXT DEFAULT 'Newcomer'`,
-                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS cached_tier_icon TEXT DEFAULT '🌱'`,
-                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS escore_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS e_score DOUBLE PRECISION DEFAULT 0`,
+                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'Newcomer'`,
+                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS tier_icon TEXT DEFAULT '🌱'`,
+                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS e_score_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+                `ALTER TABLE participants ADD COLUMN IF NOT EXISTS rewards_lifetime DOUBLE PRECISION DEFAULT 0`,
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS first_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
                 `ALTER TABLE participants ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
                 // FIX: Ensure conviction_score is DOUBLE PRECISION (might be INTEGER in old DBs)

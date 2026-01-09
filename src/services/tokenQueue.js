@@ -155,6 +155,7 @@ async function processToken(mint) {
         await redis.hdel('holdex:queue_data', mint);
 
         logger.info(`✅ [TokenQueue] Successfully added ${meta.name} (${meta.symbol}) - ${mint.slice(0, 8)}`);
+        processorStats.tokensProcessed++;
 
         // Trigger full indexing (pools, market data) in background
         const { indexTokenOnChain } = require('./indexer');
@@ -217,6 +218,26 @@ async function processQueue() {
     }
 }
 
+// Processor stats for debugging
+const processorStats = {
+    started: false,
+    lastRun: 0,
+    runsCount: 0,
+    tokensProcessed: 0,
+    errors: []
+};
+
+/**
+ * Get processor stats for debugging
+ */
+function getProcessorStats() {
+    return {
+        ...processorStats,
+        intervalActive: !!processorInterval,
+        isProcessing
+    };
+}
+
 /**
  * Start the queue processor
  */
@@ -227,10 +248,21 @@ function startQueueProcessor() {
     }
 
     logger.info('🚀 [TokenQueue] Starting queue processor');
-    processorInterval = setInterval(processQueue, PROCESS_INTERVAL_MS);
+    processorStats.started = true;
+    processorInterval = setInterval(() => {
+        processorStats.runsCount++;
+        processorStats.lastRun = Date.now();
+        processQueue().catch(err => {
+            logger.error(`[TokenQueue] Interval error: ${err.message}`);
+            processorStats.errors.push({ time: Date.now(), error: err.message });
+            if (processorStats.errors.length > 10) processorStats.errors.shift();
+        });
+    }, PROCESS_INTERVAL_MS);
 
     // Process immediately on start
-    processQueue();
+    processQueue().catch(err => {
+        logger.error(`[TokenQueue] Initial run error: ${err.message}`);
+    });
 }
 
 /**
@@ -291,5 +323,6 @@ module.exports = {
     startQueueProcessor,
     stopQueueProcessor,
     getQueueStats,
+    getProcessorStats,
     retryFailedTokens
 };

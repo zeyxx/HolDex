@@ -636,6 +636,10 @@ function init(deps) {
                 return res.json({ error: 'Redis not connected' });
             }
 
+            // Get processor stats
+            const { getProcessorStats } = require('../services/tokenQueue');
+            const processorStats = getProcessorStats();
+
             // Check the actual data in Redis
             const keyType = await redis.type('holdex:new_token_queue');
             const queueSize = await redis.scard('holdex:new_token_queue');
@@ -659,12 +663,15 @@ function init(deps) {
             }
 
             res.json({
-                keyType,
-                queueSize,
-                processingSize,
-                failedSize,
-                sampleMembers,
-                randomSample,
+                processor: processorStats,
+                redis: {
+                    keyType,
+                    queueSize,
+                    processingSize,
+                    failedSize,
+                    sampleMembers,
+                    randomSample
+                },
                 timestamp: Date.now()
             });
         } catch (err) {

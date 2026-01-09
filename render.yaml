@@ -6,7 +6,7 @@ services:
     plan: starter
     region: oregon
     repo: https://github.com/zeyxx/HolDex
-    branch: kscore-v8-rebased
+    branch: main
     buildCommand: npm install --ignore-optional
     startCommand: npm start
     envVars:
@@ -28,7 +28,7 @@ services:
     plan: starter
     region: oregon
     repo: https://github.com/zeyxx/HolDex
-    branch: kscore-v8-rebased
+    branch: main
     buildCommand: npm install --ignore-optional
     startCommand: npm run calculator
     envVars:

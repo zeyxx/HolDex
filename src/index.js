@@ -214,7 +214,7 @@ const limiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req, _res) => req.headers['x-forwarded-for'] || req.ip,
-    validate: { ipKeyGenerator: false }
+    validate: { keyGeneratorIpFallback: false }
 });
 app.use(limiter);
 

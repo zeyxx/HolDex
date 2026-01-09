@@ -47,7 +47,7 @@ const spaceRateLimiter = rateLimit({
     legacyHeaders: false,
     message: { success: false, error: 'Too many requests', code: 'RATE_LIMITED' },
     keyGenerator: (req) => req.wallet || req.ip,
-    validate: { ipKeyGenerator: false }
+    validate: { keyGeneratorIpFallback: false }
 });
 
 const writeRateLimiter = rateLimit({
@@ -57,7 +57,7 @@ const writeRateLimiter = rateLimit({
     legacyHeaders: false,
     message: { success: false, error: 'Too many write requests', code: 'WRITE_RATE_LIMITED' },
     keyGenerator: (req) => req.wallet || req.ip,
-    validate: { ipKeyGenerator: false }
+    validate: { keyGeneratorIpFallback: false }
 });
 
 // ═══════════════════════════════════════════════════════════════

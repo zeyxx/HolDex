@@ -17,7 +17,7 @@ const apiKeyRateLimit = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip,
-    validate: { ipKeyGenerator: false }
+    validate: { keyGeneratorIpFallback: false }
 });
 
 // SECURITY: Rate limit for proxy endpoints (prevents RPC abuse)
@@ -28,7 +28,7 @@ const proxyRateLimit = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip,
-    validate: { ipKeyGenerator: false }
+    validate: { keyGeneratorIpFallback: false }
 });
 
 // SECURITY: Rate limiter for token indexing (prevents RPC abuse via CA search spam)

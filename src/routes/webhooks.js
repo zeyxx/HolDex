@@ -626,6 +626,53 @@ function init(deps) {
     });
 
     /**
+     * GET /webhook/queue/debug
+     * Debug endpoint to check Redis queue directly
+     */
+    router.get('/queue/debug', async (_req, res) => {
+        try {
+            const redis = getClient();
+            if (!redis) {
+                return res.json({ error: 'Redis not connected' });
+            }
+
+            // Check the actual data in Redis
+            const keyType = await redis.type('holdex:new_token_queue');
+            const queueSize = await redis.scard('holdex:new_token_queue');
+            const processingSize = await redis.scard('holdex:processing_tokens');
+            const failedSize = await redis.scard('holdex:failed_tokens');
+
+            // Try to get some sample members
+            let sampleMembers = [];
+            let randomSample = [];
+            try {
+                sampleMembers = await redis.smembers('holdex:new_token_queue');
+                sampleMembers = sampleMembers.slice(0, 5);
+            } catch (e) {
+                sampleMembers = [`smembers error: ${e.message}`];
+            }
+
+            try {
+                randomSample = await redis.srandmember('holdex:new_token_queue', 5);
+            } catch (e) {
+                randomSample = [`srandmember error: ${e.message}`];
+            }
+
+            res.json({
+                keyType,
+                queueSize,
+                processingSize,
+                failedSize,
+                sampleMembers,
+                randomSample,
+                timestamp: Date.now()
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message, stack: err.stack });
+        }
+    });
+
+    /**
      * POST /webhook/new-tokens/setup
      * Setup the new token discovery webhook with Helius
      * Requires admin authentication

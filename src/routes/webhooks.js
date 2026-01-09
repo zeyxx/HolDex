@@ -507,25 +507,13 @@ function init(deps) {
                     stats.tokensDiscovered++;
                     discovered++;
 
-                    // Insert into database
-                    try {
-                        await db.run(`
-                            INSERT INTO tokens (
-                                mint, name, symbol, timestamp,
-                                k_score, marketCap, hasCommunityUpdate, updated_at
-                            )
-                            VALUES ($1, 'New Discovery', 'NEW', $2, 10, 0, FALSE, NOW())
-                            ON CONFLICT (mint) DO NOTHING
-                        `, [mint, Date.now()]);
-                    } catch (dbErr) {
-                        logger.error(`[NewToken] DB error: ${dbErr.message}`);
-                        stats.errors++;
-                    }
-
                     // Queue for rate-limited processing (prevents API floods)
-                    queueNewToken(mint, source).catch(e =>
-                        logger.warn(`[NewToken] Queue failed ${mint}: ${e.message}`)
-                    );
+                    // tokenQueue.js will fetch real metadata THEN insert to DB
+                    // DO NOT insert placeholder here - it would cause queueNewToken to skip
+                    const queued = await queueNewToken(mint, source);
+                    if (!queued) {
+                        logger.debug(`[NewToken] ${mint.slice(0, 8)} already queued or processing`);
+                    }
 
                     // Add to grower scanner queue
                     if (redis) {

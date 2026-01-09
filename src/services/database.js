@@ -623,8 +623,16 @@ async function initDB() {
             for (const sql of migrations) {
                 try {
                     await primaryPool.query(sql);
-                } catch (_e) {
-                    // Column might already exist, ignore
+                } catch (e) {
+                    // Only ignore "column already exists" or "already type X" errors
+                    // Log other errors to help debug migration issues
+                    const msg = e.message || '';
+                    const isExpected = msg.includes('already exists') ||
+                                       msg.includes('already has type') ||
+                                       msg.includes('does not exist');
+                    if (!isExpected) {
+                        logger.warn(`Migration warning: ${sql.slice(0, 60)}... - ${msg.slice(0, 80)}`);
+                    }
                 }
             }
 
@@ -744,10 +752,11 @@ async function enableIndexing(db, mint, poolData) {
     if (!poolData || !poolData.pairAddress) return;
     try {
         // Only update pool data if we have valid (non-zero) values, otherwise preserve existing
+        // FIX: Explicit type casts to DOUBLE PRECISION to avoid "invalid input syntax for type integer" errors
         await db.run(`
             INSERT INTO pools (
                 address, mint, dex, price_usd, liquidity_usd, volume_24h, created_at, token_a, token_b, reserve_a, reserve_b
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ) VALUES ($1, $2, $3, $4::DOUBLE PRECISION, $5::DOUBLE PRECISION, $6::DOUBLE PRECISION, $7, $8, $9, $10, $11)
             ON CONFLICT(address) DO UPDATE SET
                 price_usd = CASE WHEN EXCLUDED.price_usd > 0 THEN EXCLUDED.price_usd ELSE pools.price_usd END,
                 liquidity_usd = CASE WHEN EXCLUDED.liquidity_usd > 0 THEN EXCLUDED.liquidity_usd ELSE pools.liquidity_usd END,
@@ -755,8 +764,11 @@ async function enableIndexing(db, mint, poolData) {
                 reserve_a = COALESCE(EXCLUDED.reserve_a, pools.reserve_a),
                 reserve_b = COALESCE(EXCLUDED.reserve_b, pools.reserve_b)
         `, [
-            poolData.pairAddress, mint, poolData.dexId, poolData.priceUsd || 0, Math.floor(poolData.liquidity?.usd || 0),
-            Math.floor(poolData.volume?.h24 || 0), Date.now(),
+            poolData.pairAddress, mint, poolData.dexId,
+            // FIX: Ensure price is a proper float (might come as string from APIs)
+            parseFloat(poolData.priceUsd) || 0,
+            Math.floor(parseFloat(poolData.liquidity?.usd) || 0),
+            Math.floor(parseFloat(poolData.volume?.h24) || 0), Date.now(),
             // Handle both object format ({address: "..."}) and string format for token addresses
             typeof poolData.baseToken === 'object' ? poolData.baseToken?.address : poolData.baseToken,
             typeof poolData.quoteToken === 'object' ? poolData.quoteToken?.address : poolData.quoteToken,

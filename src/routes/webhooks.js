@@ -462,13 +462,18 @@ function init(deps) {
 
             for (const event of events) {
                 // ══════════════════════════════════════════════════════════════
-                // REPLAY PROTECTION
+                // REPLAY PROTECTION (with error isolation)
                 // ══════════════════════════════════════════════════════════════
                 const signature = event.signature;
-                if (signature && await newTokenWebhook.isReplayAttack(signature)) {
-                    stats.duplicatesSkipped++;
-                    skipped++;
-                    continue;
+                try {
+                    if (signature && await newTokenWebhook.isReplayAttack(signature)) {
+                        stats.duplicatesSkipped++;
+                        skipped++;
+                        continue;
+                    }
+                } catch (replayErr) {
+                    // Redis error - skip replay check, continue processing
+                    logger.warn(`[NewToken] Replay check failed: ${replayErr.message}`);
                 }
 
                 // ══════════════════════════════════════════════════════════════

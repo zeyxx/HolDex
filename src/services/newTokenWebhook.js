@@ -27,10 +27,26 @@ const { getClient: getRedis } = require('./redis');
 const HELIUS_API_URL = 'https://api.helius.xyz/v0';
 const WEBHOOK_TIMEOUT = 15000;
 
-// Programmes à surveiller
+// ═══════════════════════════════════════════════════════════════
+// LAUNCHPAD PROGRAMS (Solana 2025-2026)
+// Updated: 2026-01-09
+// Sources: Raydium Docs, Solscan, Bitquery APIs
+// ═══════════════════════════════════════════════════════════════
 const PROGRAMS = {
-    RAYDIUM_V4: '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
-    PUMP_FUN: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
+    // === TIER 1: Major Launchpads (>90% market share combined) ===
+    PUMP_FUN: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',           // Pump.fun bonding curve
+    PUMP_AMM: 'TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM',           // PumpSwap AMM (graduated tokens)
+    RAYDIUM_V4: '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',        // Raydium AMM V4
+    RAYDIUM_LAUNCHLAB: 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj',  // LaunchLab (BonkFun uses this)
+
+    // === TIER 2: Growing Launchpads ===
+    METEORA_DBC: 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN',        // Meteora Dynamic Bonding Curve (Believe uses this)
+    METEORA_DLMM: 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo',       // Meteora DLMM pools
+    MOONSHOT: 'MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG',           // DEXScreener's Moonshot
+
+    // === TIER 3: Other DEXes (for pool detection) ===
+    ORCA_WHIRLPOOL: 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',     // Orca Whirlpool (Wavebreak uses this)
+    RAYDIUM_CLMM: 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',      // Raydium Concentrated Liquidity
 };
 
 // Types de transactions pour nouveaux tokens
@@ -79,16 +95,31 @@ async function fetchWithTimeout(url, options = {}) {
 async function createNewTokenWebhook(callbackUrl) {
     logger.info('[NewTokenWebhook] Creating webhook for new token discovery...');
 
+    // All launchpad programs to monitor (Solana 2025-2026)
+    const monitoredPrograms = [
+        // TIER 1: Major launchpads
+        PROGRAMS.PUMP_FUN,
+        PROGRAMS.PUMP_AMM,
+        PROGRAMS.RAYDIUM_V4,
+        PROGRAMS.RAYDIUM_LAUNCHLAB,
+        // TIER 2: Growing launchpads
+        PROGRAMS.METEORA_DBC,
+        PROGRAMS.METEORA_DLMM,
+        PROGRAMS.MOONSHOT,
+        // TIER 3: Other DEXes
+        PROGRAMS.ORCA_WHIRLPOOL,
+        PROGRAMS.RAYDIUM_CLMM,
+    ];
+
+    logger.info(`[NewTokenWebhook] Monitoring ${monitoredPrograms.length} programs`);
+
     const response = await fetchWithTimeout(getWebhookApiUrl(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             webhookURL: callbackUrl,
             transactionTypes: NEW_TOKEN_TX_TYPES,
-            accountAddresses: [
-                PROGRAMS.RAYDIUM_V4,
-                PROGRAMS.PUMP_FUN
-            ],
+            accountAddresses: monitoredPrograms,
             webhookType: 'enhanced',
             encoding: 'jsonParsed'
         })
@@ -193,10 +224,23 @@ function extractMintsFromEvent(event) {
     }
 
     // Instructions peuvent contenir des mints
+    // Check all monitored launchpad programs
+    const LAUNCHPAD_PROGRAMS = new Set([
+        PROGRAMS.PUMP_FUN,
+        PROGRAMS.PUMP_AMM,
+        PROGRAMS.RAYDIUM_V4,
+        PROGRAMS.RAYDIUM_LAUNCHLAB,
+        PROGRAMS.RAYDIUM_CLMM,
+        PROGRAMS.METEORA_DBC,
+        PROGRAMS.METEORA_DLMM,
+        PROGRAMS.MOONSHOT,
+        PROGRAMS.ORCA_WHIRLPOOL,
+    ]);
+
     if (event.instructions) {
         event.instructions.forEach(ix => {
-            // Raydium initialize
-            if (ix.programId === PROGRAMS.RAYDIUM_V4) {
+            // Extract accounts from any monitored launchpad program
+            if (LAUNCHPAD_PROGRAMS.has(ix.programId)) {
                 ix.accounts?.forEach(acc => {
                     if (acc && !IGNORED_MINTS.has(acc) && acc.length >= 32 && acc.length <= 44) {
                         mints.add(acc);
@@ -210,7 +254,8 @@ function extractMintsFromEvent(event) {
 }
 
 /**
- * Déterminer la source (Raydium ou Pump.fun)
+ * Déterminer la source du token (launchpad/DEX)
+ * Updated 2026-01-09 for all major Solana launchpads
  */
 function detectSource(event) {
     const programIds = new Set();
@@ -221,8 +266,17 @@ function detectSource(event) {
         });
     }
 
-    if (programIds.has(PROGRAMS.RAYDIUM_V4)) return 'Raydium';
+    // Check in priority order (most specific first)
     if (programIds.has(PROGRAMS.PUMP_FUN)) return 'Pump.fun';
+    if (programIds.has(PROGRAMS.PUMP_AMM)) return 'PumpSwap';
+    if (programIds.has(PROGRAMS.RAYDIUM_LAUNCHLAB)) return 'LaunchLab';
+    if (programIds.has(PROGRAMS.RAYDIUM_V4)) return 'Raydium';
+    if (programIds.has(PROGRAMS.RAYDIUM_CLMM)) return 'Raydium-CLMM';
+    if (programIds.has(PROGRAMS.METEORA_DBC)) return 'Meteora-DBC';
+    if (programIds.has(PROGRAMS.METEORA_DLMM)) return 'Meteora';
+    if (programIds.has(PROGRAMS.MOONSHOT)) return 'Moonshot';
+    if (programIds.has(PROGRAMS.ORCA_WHIRLPOOL)) return 'Orca';
+
     return 'Unknown';
 }
 

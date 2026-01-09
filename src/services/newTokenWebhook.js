@@ -157,12 +157,18 @@ async function updateWebhook(webhookId) {
     logger.info(`[NewTokenWebhook] Updating webhook ${webhookId} with new programs...`);
 
     // First, get existing webhook details (Helius PUT requires all fields)
-    const getResponse = await fetchWithTimeout(getWebhookApiUrl(`/${webhookId}`));
-    if (!getResponse.ok) {
-        const error = await getResponse.text();
-        throw new Error(`Failed to get webhook: ${error}`);
+    // Helius returns array from list endpoint, need to find our webhook
+    const listResponse = await fetchWithTimeout(getWebhookApiUrl());
+    if (!listResponse.ok) {
+        const error = await listResponse.text();
+        throw new Error(`Failed to list webhooks: ${error}`);
     }
-    const existing = await getResponse.json();
+    const webhooks = await listResponse.json();
+    const existing = webhooks.find(w => w.webhookID === webhookId);
+    if (!existing) {
+        throw new Error(`Webhook ${webhookId} not found`);
+    }
+    logger.info(`[NewTokenWebhook] Found existing webhook: ${existing.webhookURL}`);
 
     const monitoredPrograms = [
         PROGRAMS.PUMP_FUN,
@@ -177,16 +183,23 @@ async function updateWebhook(webhookId) {
     ];
 
     // Helius PUT requires all fields - merge with existing
+    const updatePayload = {
+        webhookURL: existing.webhookURL,
+        webhookType: existing.webhookType,
+        accountAddresses: monitoredPrograms,
+        transactionTypes: NEW_TOKEN_TX_TYPES,
+        encoding: existing.encoding || 'jsonParsed',
+    };
+    // Include authHeader if present
+    if (existing.authHeader) {
+        updatePayload.authHeader = existing.authHeader;
+    }
+    logger.info(`[NewTokenWebhook] Sending update: ${JSON.stringify(updatePayload, null, 2)}`);
+
     const response = await fetchWithTimeout(getWebhookApiUrl(`/${webhookId}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            webhookURL: existing.webhookURL,
-            webhookType: existing.webhookType,
-            accountAddresses: monitoredPrograms,
-            transactionTypes: NEW_TOKEN_TX_TYPES,
-            encoding: existing.encoding || 'jsonParsed',
-        })
+        body: JSON.stringify(updatePayload)
     });
 
     if (!response.ok) {

@@ -95,20 +95,11 @@ async function fetchWithTimeout(url, options = {}) {
 async function createNewTokenWebhook(callbackUrl) {
     logger.info('[NewTokenWebhook] Creating webhook for new token discovery...');
 
-    // All launchpad programs to monitor (Solana 2025-2026)
+    // CREDIT OPTIMIZATION: Only essential launchpads
+    // Reduced from 9 to 2 programs to save ~80% credits
     const monitoredPrograms = [
-        // TIER 1: Major launchpads
-        PROGRAMS.PUMP_FUN,
-        PROGRAMS.PUMP_AMM,
-        PROGRAMS.RAYDIUM_V4,
-        PROGRAMS.RAYDIUM_LAUNCHLAB,
-        // TIER 2: Growing launchpads
-        PROGRAMS.METEORA_DBC,
-        PROGRAMS.METEORA_DLMM,
-        PROGRAMS.MOONSHOT,
-        // TIER 3: Other DEXes
-        PROGRAMS.ORCA_WHIRLPOOL,
-        PROGRAMS.RAYDIUM_CLMM,
+        PROGRAMS.PUMP_FUN,      // Primary memecoin launchpad
+        PROGRAMS.RAYDIUM_V4,    // Primary DEX for new tokens
     ];
 
     logger.info(`[NewTokenWebhook] Monitoring ${monitoredPrograms.length} programs`);
@@ -170,16 +161,11 @@ async function updateWebhook(webhookId) {
     }
     logger.info(`[NewTokenWebhook] Found existing webhook: ${existing.webhookURL}`);
 
+    // CREDIT OPTIMIZATION: Only essential launchpads
+    // Reduced from 9 to 2 programs to save ~80% credits
     const monitoredPrograms = [
-        PROGRAMS.PUMP_FUN,
-        PROGRAMS.PUMP_AMM,
-        PROGRAMS.RAYDIUM_V4,
-        PROGRAMS.RAYDIUM_LAUNCHLAB,
-        PROGRAMS.METEORA_DBC,
-        PROGRAMS.METEORA_DLMM,
-        PROGRAMS.MOONSHOT,
-        PROGRAMS.ORCA_WHIRLPOOL,
-        PROGRAMS.RAYDIUM_CLMM,
+        PROGRAMS.PUMP_FUN,      // Primary memecoin launchpad
+        PROGRAMS.RAYDIUM_V4,    // Primary DEX for new tokens
     ];
 
     // Helius PUT requires all fields - merge with existing

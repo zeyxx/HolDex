@@ -16,9 +16,10 @@ const logger = require('./logger');
 const QUEUE_KEY = 'holdex:new_token_queue';
 const PROCESSING_KEY = 'holdex:processing_tokens';
 const FAILED_KEY = 'holdex:failed_tokens';
-const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 3000;
-const PROCESS_INTERVAL_MS = 2000;
+const MAX_RETRIES = 3;           // Reduced from 5 - fail faster
+const RETRY_DELAY_MS = 500;      // Reduced from 3000ms - faster cycling
+const PROCESS_INTERVAL_MS = 1000; // Reduced from 2000ms - more frequent
+const BATCH_SIZE = 10;           // Increased from 5 - more parallel
 
 let isProcessing = false;
 let processorInterval = null;
@@ -208,7 +209,7 @@ async function processQueue() {
     try {
         // Use SRANDMEMBER instead of SMEMBERS to avoid loading 10,000+ tokens into memory
         // This is O(count) vs O(n) for large sets
-        const tokens = await redis.srandmember(QUEUE_KEY, 5);
+        const tokens = await redis.srandmember(QUEUE_KEY, BATCH_SIZE);
 
         if (!tokens || tokens.length === 0) {
             // No tokens to process - this is normal
@@ -216,17 +217,19 @@ async function processQueue() {
             return;
         }
 
-        logger.info(`📋 [TokenQueue] Processing batch of ${tokens.length} token(s)`);
+        logger.info(`📋 [TokenQueue] Processing batch of ${tokens.length} token(s) in parallel`);
 
-        // Process batch with delay between each
-        for (const mint of tokens) {
+        // Process batch in parallel (with individual error handling)
+        await Promise.all(tokens.map(async (mint) => {
             try {
                 await processToken(mint);
             } catch (tokenErr) {
                 logger.error(`[TokenQueue] Token error ${mint.slice(0, 8)}: ${tokenErr.message}`);
             }
-            await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-        }
+        }));
+
+        // Small delay before next batch to avoid overwhelming APIs
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
     } catch (err) {
         logger.error(`[TokenQueue] Queue processing error: ${err.message}`);
         logger.error(err.stack);

@@ -1,12 +1,1 @@
-{
-  "mcpServers": {
-    "claude-mem": {
-      "type": "stdio",
-      "command": "node",
-      "args": [
-        "../claude-mem/plugin/scripts/mcp-server.cjs"
-      ],
-      "env": {}
-    }
-  }
-}
+/workspaces/.mcp.json

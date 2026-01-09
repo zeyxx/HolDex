@@ -16,7 +16,9 @@ const { getClient } = require('../services/redis');
 const { isValidSolanaAddress, sanitizeError } = require('../utils/validation');
 const verification = require('../services/verificationService');
 const newTokenWebhook = require('../services/newTokenWebhook');
-const { indexTokenOnChain } = require('../services/indexer');
+const { queueNewToken } = require('../services/tokenQueue');
+// DISABLED: Direct indexing causes rate limit floods
+// const { indexTokenOnChain } = require('../services/indexer');
 
 // Security: Replay attack prevention via Redis (cluster-safe, persistent)
 const REPLAY_WINDOW_SECONDS = 300; // 5 minutes TTL
@@ -520,9 +522,9 @@ function init(deps) {
                         stats.errors++;
                     }
 
-                    // Trigger async indexing (non-blocking)
-                    indexTokenOnChain(mint).catch(e =>
-                        logger.warn(`[NewToken] Index failed ${mint}: ${e.message}`)
+                    // Queue for rate-limited processing (prevents API floods)
+                    queueNewToken(mint, source).catch(e =>
+                        logger.warn(`[NewToken] Queue failed ${mint}: ${e.message}`)
                     );
 
                     // Add to grower scanner queue

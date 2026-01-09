@@ -449,6 +449,11 @@ async function startServer() {
         await initDB();
         await connectRedis();
 
+        // Start Token Queue Processor (rate-limited token indexing)
+        const { startQueueProcessor } = require('./services/tokenQueue');
+        startQueueProcessor();
+        logger.info('✅ Token Queue Processor started (2s rate limit)');
+
         // Start WebSocket Server
         initSocket(server, allowedOrigins);
 

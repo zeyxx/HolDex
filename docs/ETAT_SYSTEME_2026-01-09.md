@@ -143,12 +143,24 @@ curl https://ton-api.onrender.com/api/health
 ```
 
 ### Cette Semaine
-```bash
-# 1. Cherry-pick admin fixes de sollama58
-git cherry-pick 6039ced a7bfa5a a740a59
 
-# 2. Cherry-pick homepage upgrade
-git cherry-pick 5be1010 029422c
+**ATTENTION: Cherry-pick impossible sans conflits!**
+
+Analyse des conflits:
+| Fichier | Problème |
+|---------|----------|
+| `homepage.html` | sollama58 supprime notre Watchlist UI |
+| `src/routes/tokens.js` | sollama58 supprime notre fix rate-limit |
+| `admin.html` | Changements compatibles mais styles différents |
+
+**Stratégie recommandée**: Intégration manuelle
+```javascript
+// 1. Ajouter endpoint /admin/run-migrations de sollama58
+// (copier-coller dans src/routes/tokens.js)
+
+// 2. NE PAS toucher homepage.html - notre watchlist doit rester
+
+// 3. Pour admin.html - intégrer les nouveaux styles btn-blue, btn-orange
 ```
 
 ### Coordination sollama58

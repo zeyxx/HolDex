@@ -18,8 +18,8 @@ const PROCESSING_KEY = 'holdex:processing_tokens';
 const FAILED_KEY = 'holdex:failed_tokens';
 const MAX_RETRIES = 3;           // Reduced from 5 - fail faster
 const RETRY_DELAY_MS = 500;      // Reduced from 3000ms - faster cycling
-const PROCESS_INTERVAL_MS = 1000; // Reduced from 2000ms - more frequent
-const BATCH_SIZE = 10;           // Increased from 5 - more parallel
+const PROCESS_INTERVAL_MS = 2000; // Back to 2s - DB connection exhaustion
+const BATCH_SIZE = 3;            // Reduced to 3 - prevent DB pool exhaustion (max 10 connections)
 
 let isProcessing = false;
 let processorInterval = null;

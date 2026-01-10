@@ -18,17 +18,15 @@ const { getRedis: _getRedis } = require('./redis');
 // CONFIGURATION
 // ============================================
 
-// Jupiter Price API - requires API key from https://portal.jup.ag/
-// Pro tier: 600 requests per 10 seconds
-// JUPITER_API_KEY must be set in environment
+// Raydium Price API - FREE, no API key required
+// Primary source for token prices
+const RAYDIUM_PRICE_URL = 'https://api-v3.raydium.io/mint/price';
+const RAYDIUM_BATCH_SIZE = 100; // Conservative batch size
+
+// Jupiter as fallback (requires paid API key)
 const JUPITER_API_KEY = config.JUPITER_API_KEY || process.env.JUPITER_API_KEY;
 const JUPITER_PRICE_URL = 'https://api.jup.ag/price/v2';
-const JUPITER_BATCH_SIZE = 100; // Jupiter allows up to 100 tokens per request
-
-// Warn if no API key (Jupiter requires it now)
-if (!JUPITER_API_KEY) {
-    logger.warn('[PriceProvider] JUPITER_API_KEY not set - prices will fail. Get key at https://portal.jup.ag/');
-}
+const JUPITER_BATCH_SIZE = 100;
 
 // Helius RPC for on-chain data
 const HELIUS_RPC_URL = 'https://mainnet.helius-rpc.com';
@@ -127,11 +125,92 @@ async function getSolPrice() {
 }
 
 // ============================================
-// JUPITER PRICE API V3
+// RAYDIUM PRICE API (PRIMARY - FREE)
 // ============================================
 
 /**
- * Fetch prices from Jupiter Price API
+ * Fetch prices from Raydium API (free, no key required)
+ * @param {string[]} mints - Array of token mint addresses
+ * @returns {Map<string, Object>} Map of mint -> price data
+ */
+async function fetchRaydiumPrices(mints, retryCount = 0) {
+    if (!mints || mints.length === 0) return new Map();
+
+    const MAX_RETRIES = 3;
+    const results = new Map();
+
+    // Raydium batch: comma-separated
+    const batchMints = mints.slice(0, RAYDIUM_BATCH_SIZE);
+    const mintsParam = batchMints.join(',');
+    const url = `${RAYDIUM_PRICE_URL}?mints=${mintsParam}`;
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        // Handle rate limiting
+        if (response.status === 429) {
+            if (retryCount < MAX_RETRIES) {
+                const delay = 1000 * Math.pow(2, retryCount);
+                logger.debug(`[Raydium] Rate limited, retry ${retryCount + 1} in ${delay}ms`);
+                await new Promise(r => setTimeout(r, delay));
+                return fetchRaydiumPrices(mints, retryCount + 1);
+            }
+            logger.warn('[Raydium] Rate limit exceeded, max retries');
+            return results;
+        }
+
+        if (!response.ok) {
+            logger.warn(`[Raydium] Price API error: ${response.status}`);
+            return results;
+        }
+
+        const data = await response.json();
+        const now = Date.now();
+
+        if (!data.success || !data.data) {
+            logger.warn('[Raydium] Invalid response format');
+            return results;
+        }
+
+        // Process Raydium response: { data: { [mint]: "price_string" } }
+        for (const mint of batchMints) {
+            const priceStr = data.data[mint];
+            if (!priceStr) continue;
+
+            const priceUsd = parseFloat(priceStr);
+            if (!priceUsd || priceUsd <= 0) continue;
+
+            results.set(mint, {
+                priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
+                source: 'raydium',
+                timestamp: now,
+                confidence: 'high'
+            });
+        }
+
+        logger.debug(`[Raydium] Fetched ${results.size}/${batchMints.length} prices`);
+        return results;
+
+    } catch (e) {
+        if (e.name === 'AbortError') {
+            logger.warn('[Raydium] Request timeout');
+        } else {
+            logger.error('[Raydium] Fetch error:', e.message);
+        }
+        return results;
+    }
+}
+
+// ============================================
+// JUPITER PRICE API (FALLBACK - PAID)
+// ============================================
+
+/**
+ * Fetch prices from Jupiter Price API (requires API key)
  * @param {string[]} mints - Array of token mint addresses
  * @returns {Map<string, Object>} Map of mint -> price data
  */
@@ -478,7 +557,7 @@ async function getPrice(mint, options = {}) {
 
 /**
  * Batch fetch prices for multiple tokens
- * Optimized for efficiency - single Jupiter call + parallel Raydium calls
+ * Uses Raydium as primary (free), Jupiter as fallback (paid)
  *
  * @param {string[]} mints - Array of token mint addresses
  * @returns {Map<string, Object>} Map of mint -> price data
@@ -489,69 +568,77 @@ async function fetchBatchPrices(mints) {
     const results = new Map();
     const now = Date.now();
 
-    // 1. Batch fetch from Jupiter (up to 100 at once)
-    const jupiterPrices = await fetchJupiterPrices(mints);
+    // 1. PRIMARY: Batch fetch from Raydium (FREE)
+    const raydiumPrices = await fetchRaydiumPrices(mints);
 
-    // 2. For tokens with Jupiter prices, fetch Raydium liquidity in parallel
-    const raydiumPromises = [];
+    // 2. Find tokens missing from Raydium
+    const missingMints = mints.filter(m => !raydiumPrices.has(m));
+
+    // 3. FALLBACK: Try Jupiter for missing tokens (if API key available)
+    let jupiterPrices = new Map();
+    if (missingMints.length > 0 && JUPITER_API_KEY) {
+        jupiterPrices = await fetchJupiterPrices(missingMints);
+    }
+
+    // 4. Fetch pool info for liquidity/volume (parallel, rate-limited)
+    const poolPromises = [];
     for (const mint of mints) {
-        raydiumPromises.push(
+        poolPromises.push(
             getRaydiumPoolInfo(mint)
                 .then(data => ({ mint, data }))
                 .catch(() => ({ mint, data: null }))
         );
     }
 
-    // Limit concurrent Raydium requests
-    const RAYDIUM_CONCURRENCY = 5;
-    const raydiumResults = new Map();
+    // Limit concurrent pool requests
+    const POOL_CONCURRENCY = 5;
+    const poolResults = new Map();
 
-    for (let i = 0; i < raydiumPromises.length; i += RAYDIUM_CONCURRENCY) {
-        const batch = raydiumPromises.slice(i, i + RAYDIUM_CONCURRENCY);
+    for (let i = 0; i < poolPromises.length; i += POOL_CONCURRENCY) {
+        const batch = poolPromises.slice(i, i + POOL_CONCURRENCY);
         const batchResults = await Promise.all(batch);
         for (const { mint, data } of batchResults) {
-            if (data) raydiumResults.set(mint, data);
+            if (data) poolResults.set(mint, data);
         }
-        // Small delay between batches to be respectful
-        if (i + RAYDIUM_CONCURRENCY < raydiumPromises.length) {
+        // Small delay between batches
+        if (i + POOL_CONCURRENCY < poolPromises.length) {
             await new Promise(r => setTimeout(r, 200));
         }
     }
 
-    // 3. Combine results - use null for missing data to distinguish from actual 0 values
+    // 5. Combine results
     for (const mint of mints) {
+        const raydium = raydiumPrices.get(mint);
         const jupiter = jupiterPrices.get(mint);
-        const raydium = raydiumResults.get(mint);
+        const pool = poolResults.get(mint);
 
-        if (!jupiter && !raydium) continue;
-
-        // Use null for fields where we don't have valid data
-        // This allows the database update to preserve existing values
-        const priceUsd = jupiter?.priceUsd || raydium?.price || null;
-        const liquidity = raydium?.liquidity || null;
-        const volume24h = raydium?.volume24h || null; // Jupiter V3 doesn't provide volume
-        const change24h = jupiter?.change24h ?? null;
+        // Get price from Raydium (primary) or Jupiter (fallback)
+        const priceUsd = raydium?.priceUsd || jupiter?.priceUsd || pool?.price || null;
 
         // Skip if we have no price data at all
         if (!priceUsd || priceUsd <= 0) continue;
+
+        // Get liquidity/volume from pool info
+        const liquidity = pool?.liquidity || null;
+        const volume24h = pool?.volume24h || null;
 
         results.set(mint, {
             priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
             mcap: 0, // Calculated separately with supply
             liquidity: liquidity !== null ? clampValue(liquidity, PRICE_BOUNDS.MIN_LIQUIDITY, PRICE_BOUNDS.MAX_LIQUIDITY) : null,
             volume24h: volume24h !== null ? clampValue(volume24h, PRICE_BOUNDS.MIN_VOLUME, PRICE_BOUNDS.MAX_VOLUME) : null,
-            change24h: change24h !== null ? clampValue(change24h, PRICE_BOUNDS.MIN_CHANGE_PCT, PRICE_BOUNDS.MAX_CHANGE_PCT) : null,
-            change1h: null, // Not available from Jupiter free tier
-            change5m: null, // Not available from Jupiter free tier
-            pairAddress: raydium?.poolAddress || null,
-            dex: raydium?.dex || 'unknown',
-            source: jupiter ? 'jupiter' : 'raydium',
+            change24h: null, // Not available from Raydium price API
+            change1h: null,
+            change5m: null,
+            pairAddress: pool?.poolAddress || null,
+            dex: pool?.dex || 'raydium',
+            source: raydium ? 'raydium' : (jupiter ? 'jupiter' : 'pool'),
             timestamp: now,
-            confidence: jupiter?.confidence || 'low'
+            confidence: raydium ? 'high' : 'medium'
         });
     }
 
-    logger.debug(`[PriceProvider] Batch: ${results.size}/${mints.length} tokens`);
+    logger.debug(`[PriceProvider] Batch: ${results.size}/${mints.length} tokens (Raydium: ${raydiumPrices.size}, Jupiter: ${jupiterPrices.size})`);
     return results;
 }
 
@@ -616,6 +703,7 @@ module.exports = {
     getSolPrice,
 
     // Individual source functions
+    fetchRaydiumPrices,
     fetchJupiterPrices,
     getJupiterPrice,
     getRaydiumPoolInfo,

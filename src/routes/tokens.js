@@ -555,6 +555,32 @@ function init(deps) {
         }
     });
 
+    /**
+     * GET /health/rpc/hardcap
+     * Per-node HARDCAP status with φ-based limits
+     */
+    router.get('/health/rpc/hardcap', cacheControl(10, 30), proxyRateLimit, async (req, res) => {
+        try {
+            const hardcap = require('../services/rpcHardcap');
+
+            // Get status for all node types
+            const allStatus = await hardcap.getAllNodeStatus();
+
+            res.json({
+                success: true,
+                timestamp: new Date().toISOString(),
+                ...allStatus
+            });
+        } catch (e) {
+            logger.error(`[RPC Hardcap] Check failed: ${e.message}`);
+            res.status(500).json({
+                success: false,
+                error: 'RPC hardcap check failed',
+                message: e.message
+            });
+        }
+    });
+
     // PUBLIC: Candle Chart
     router.get('/token/:mint/candles', cacheControl(30, 60), unifiedRateLimiter, async (req, res) => {
         const { mint } = req.params;

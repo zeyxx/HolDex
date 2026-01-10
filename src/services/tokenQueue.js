@@ -31,7 +31,7 @@ const PROCESSING_KEY = 'holdex:processing_tokens';
 const FAILED_KEY = 'holdex:failed_tokens';
 
 // Configuration - φ aligned
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 1;  // Reduced from 3 to save RPC credits - most failures are permanent (no metadata)
 const RETRY_DELAY_MS = 500;
 const PROCESS_INTERVAL_MS = 2000;
 const BATCH_SIZE = 5;                    // Increased - only processing active tokens now

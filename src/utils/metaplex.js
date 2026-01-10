@@ -26,6 +26,10 @@ function isValidMetadata(meta) {
 async function fetchTokenMetadata(mintAddress) {
     console.log(`[Metaplex] Fetching metadata for ${mintAddress.slice(0,8)}...`);
 
+    // Track if Helius DAS explicitly returned no result (not an error)
+    // If so, skip on-chain lookup - token likely has no Metaplex metadata account
+    let heliusDasNoResult = false;
+
     // 1. Primary: GeckoTerminal API (free, no key required)
     try {
         const geckoRes = await axios.get(
@@ -104,6 +108,7 @@ async function fetchTokenMetadata(mintAddress) {
                 }
             } else {
                 console.log(`[Metaplex] Helius DAS returned no result for ${mintAddress.slice(0,8)}`);
+                heliusDasNoResult = true;  // Token likely has no Metaplex metadata
             }
         } catch (e) {
             console.log(`[Metaplex] Helius DAS failed for ${mintAddress.slice(0,8)}: ${e.message}`);
@@ -167,68 +172,73 @@ async function fetchTokenMetadata(mintAddress) {
     }
 
     // 5. Last resort: On-Chain Metaplex Parse
-    try {
-        const connection = getSolanaConnection();
-        const mint = new PublicKey(mintAddress);
-        const [pda] = PublicKey.findProgramAddressSync(
-            [Buffer.from('metadata'), METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
-            METADATA_PROGRAM_ID
-        );
+    // Skip if Helius DAS already confirmed no metadata exists (saves 1 RPC credit)
+    if (heliusDasNoResult) {
+        console.log(`[Metaplex] Skipping on-chain lookup for ${mintAddress.slice(0,8)} - Helius DAS confirmed no metadata`);
+    } else {
+        try {
+            const connection = getSolanaConnection();
+            const mint = new PublicKey(mintAddress);
+            const [pda] = PublicKey.findProgramAddressSync(
+                [Buffer.from('metadata'), METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+                METADATA_PROGRAM_ID
+            );
 
-        const info = await connection.getAccountInfo(pda);
-        if (info) {
-            const data = info.data;
-            // Metaplex Data Layout:
-            // 0: key (1)
-            // 1: update_auth (32)
-            // 33: mint (32)
-            // 65: name len (4) + name bytes
-            let offset = 65;
-            const nameLen = data.readUInt32LE(offset);
-            offset += 4;
-            const name = data.subarray(offset, offset + nameLen).toString('utf-8');
-            offset += nameLen;
+            const info = await connection.getAccountInfo(pda);
+            if (info) {
+                const data = info.data;
+                // Metaplex Data Layout:
+                // 0: key (1)
+                // 1: update_auth (32)
+                // 33: mint (32)
+                // 65: name len (4) + name bytes
+                let offset = 65;
+                const nameLen = data.readUInt32LE(offset);
+                offset += 4;
+                const name = data.subarray(offset, offset + nameLen).toString('utf-8');
+                offset += nameLen;
 
-            const symbolLen = data.readUInt32LE(offset);
-            offset += 4;
-            const symbol = data.subarray(offset, offset + symbolLen).toString('utf-8');
-            offset += symbolLen;
+                const symbolLen = data.readUInt32LE(offset);
+                offset += 4;
+                const symbol = data.subarray(offset, offset + symbolLen).toString('utf-8');
+                offset += symbolLen;
 
-            const uriLen = data.readUInt32LE(offset);
-            offset += 4;
-            const uri = data.subarray(offset, offset + uriLen).toString('utf-8');
+                const uriLen = data.readUInt32LE(offset);
+                offset += 4;
+                const uri = data.subarray(offset, offset + uriLen).toString('utf-8');
 
-            const onChainMeta = {
-                name: removeNullBytes(name),
-                symbol: removeNullBytes(symbol),
-                image: null,
-                description: ''
-            };
+                const onChainMeta = {
+                    name: removeNullBytes(name),
+                    symbol: removeNullBytes(symbol),
+                    image: null,
+                    description: ''
+                };
 
-            // Fetch the JSON URI for image
-            const cleanUri = removeNullBytes(uri);
-            if (cleanUri) {
-                try {
-                    const jsonRes = await axios.get(cleanUri, { timeout: 3000 });
-                    onChainMeta.image = jsonRes.data.image;
-                    onChainMeta.description = jsonRes.data.description || '';
-                } catch (_e) {
-                    // Failed to fetch JSON URI - continue with what we have
+                // Fetch the JSON URI for image
+                const cleanUri = removeNullBytes(uri);
+                if (cleanUri) {
+                    try {
+                        const jsonRes = await axios.get(cleanUri, { timeout: 3000 });
+                        onChainMeta.image = jsonRes.data.image;
+                        onChainMeta.description = jsonRes.data.description || '';
+                    } catch (_e) {
+                        // Failed to fetch JSON URI - continue with what we have
+                    }
                 }
-            }
 
-            console.log(`[Metaplex] On-chain parsed for ${mintAddress.slice(0,8)}: name=${onChainMeta.name}, symbol=${onChainMeta.symbol}`);
-            if (isValidMetadata(onChainMeta)) {
-                console.log(`[Metaplex] Found metadata via on-chain parse for ${mintAddress.slice(0,8)}`);
-                return onChainMeta;
+                console.log(`[Metaplex] On-chain parsed for ${mintAddress.slice(0,8)}: name=${onChainMeta.name}, symbol=${onChainMeta.symbol}`);
+                if (isValidMetadata(onChainMeta)) {
+                    console.log(`[Metaplex] Found metadata via on-chain parse for ${mintAddress.slice(0,8)}`);
+                    return onChainMeta;
+                } else {
+                    console.log(`[Metaplex] On-chain returned invalid metadata for ${mintAddress.slice(0,8)}: name=${onChainMeta.name}, symbol=${onChainMeta.symbol}`);
+                }
             } else {
-                console.log(`[Metaplex] On-chain returned invalid metadata for ${mintAddress.slice(0,8)}: name=${onChainMeta.name}, symbol=${onChainMeta.symbol}`);
+                console.log(`[Metaplex] No on-chain metadata account found for ${mintAddress.slice(0,8)}`);
             }
-        } else {
-            console.log(`[Metaplex] No on-chain metadata account found for ${mintAddress.slice(0,8)}`);
+        } catch (e) {
+            console.warn(`[Metaplex] On-chain parse failed for ${mintAddress.slice(0,8)}: ${e.message}`);
         }
-    } catch (e) {
-        console.warn(`[Metaplex] On-chain parse failed for ${mintAddress.slice(0,8)}: ${e.message}`);
     }
 
     console.warn(`[Metaplex] ALL SOURCES FAILED for ${mintAddress.slice(0,8)} - returning null`);

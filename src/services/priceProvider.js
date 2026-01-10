@@ -13,7 +13,7 @@
 const config = require('../config/env');
 const logger = require('./logger');
 const { getRedis } = require('./redis');
-const { waitForRateLimit } = require('./heliusRateLimiter');
+const { getRPCProvider } = require('./rpcProvider');
 
 // ============================================
 // CONFIGURATION
@@ -153,22 +153,11 @@ async function getSolPricePyth() {
     }
 
     try {
-        const { PublicKey, Connection } = require('@solana/web3.js');
+        const { PublicKey } = require('@solana/web3.js');
 
-        // Use Helius if available, otherwise public RPC
-        // Pyth is a simple account read, public RPC works fine
-        const rpcUrl = config.HELIUS_API_KEY
-            ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
-            : 'https://api.mainnet-beta.solana.com';
-
-        // P6: Rate limit before RPC call (if using Helius)
-        if (config.HELIUS_API_KEY) {
-            await waitForRateLimit();
-        }
-
-        const connection = new Connection(rpcUrl, 'confirmed');
-
-        const accountInfo = await connection.getAccountInfo(
+        // Use L2 provider (handles rate limiting and fallback)
+        const provider = getRPCProvider();
+        const accountInfo = await provider.getAccountInfo(
             new PublicKey(PYTH_SOL_USD_FEED)
         );
 
@@ -667,7 +656,7 @@ function derivePumpFunBondingCurve(mint) {
  * @param {Connection} connection - Solana RPC connection (optional)
  * @returns {Object|null} Price data or null if not on curve
  */
-async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
+async function fetchPumpFunBondingCurvePrice(mint, _connection = null) {
     // P6: Check Redis cache first (30s TTL for on-chain prices)
     const redis = getRedis();
     const cacheKey = `price:pumpfun:${mint}`;
@@ -682,27 +671,15 @@ async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
     }
 
     try {
-        const { PublicKey, Connection } = require('@solana/web3.js');
-
-        // Get or create connection
-        if (!connection) {
-            const heliusUrl = config.HELIUS_API_KEY
-                ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
-                : HELIUS_RPC_URL;
-            connection = new Connection(heliusUrl, 'confirmed');
-        }
-
-        // P6: Rate limit before RPC call
-        if (config.HELIUS_API_KEY) {
-            await waitForRateLimit();
-        }
+        const { PublicKey } = require('@solana/web3.js');
 
         // Derive bonding curve PDA
         const bondingCurveAddress = derivePumpFunBondingCurve(mint);
         const bondingCurvePubkey = new PublicKey(bondingCurveAddress);
 
-        // Fetch bonding curve account
-        const accountInfo = await connection.getAccountInfo(bondingCurvePubkey);
+        // Use L2 provider (handles rate limiting and fallback)
+        const provider = getRPCProvider();
+        const accountInfo = await provider.getAccountInfo(bondingCurvePubkey);
 
         if (!accountInfo || !accountInfo.data) {
             // Token not on PumpFun bonding curve
@@ -797,13 +774,10 @@ async function fetchPumpFunOnChainPrices(mints) {
     const results = new Map();
 
     try {
-        const { PublicKey, Connection } = require('@solana/web3.js');
+        const { PublicKey } = require('@solana/web3.js');
 
-        // Get connection
-        const heliusUrl = config.HELIUS_API_KEY
-            ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
-            : HELIUS_RPC_URL;
-        const connection = new Connection(heliusUrl, 'confirmed');
+        // Use L2 provider (handles rate limiting and fallback)
+        const provider = getRPCProvider();
 
         // Derive all bonding curve PDAs
         const bondingCurves = mints.map(mint => {
@@ -829,12 +803,8 @@ async function fetchPumpFunOnChainPrices(mints) {
             const pubkeys = batch.map(b => b.pda);
 
             try {
-                // P6: Rate limit before batch RPC call
-                if (config.HELIUS_API_KEY) {
-                    await waitForRateLimit();
-                }
-
-                const accounts = await connection.getMultipleAccountsInfo(pubkeys);
+                // Provider handles rate limiting internally
+                const accounts = await provider.getMultipleAccountsInfo(pubkeys);
 
                 for (let j = 0; j < accounts.length; j++) {
                     const accountInfo = accounts[j];

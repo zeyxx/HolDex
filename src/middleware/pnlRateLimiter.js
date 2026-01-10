@@ -191,9 +191,10 @@ const pnlRateLimiter = async (req, res, next) => {
 
         // 3. Get target wallet and maxPages from request
         const targetWallet = req.params.address;
-        // Token-specific route uses maxPages=20, wallet route uses query param
+        // φ-OPTIMIZATION: Reduced maxPages to protect Helius credits
+        // Token-specific route uses maxPages=5 (was 20), wallet route uses query param
         const isTokenRoute = !!req.params.mint;
-        const maxPages = isTokenRoute ? 20 : Math.min(parseInt(req.query.maxPages) || 10, 50);
+        const maxPages = isTokenRoute ? 5 : Math.min(parseInt(req.query.maxPages) || 3, 8);
 
         // 3. Check if result is cached
         const isCached = await isPnLCached(targetWallet, maxPages);

@@ -18,9 +18,15 @@ const config = require('../config/env');
 const { getSolPrice } = require('./priceService');
 const logger = require('./logger');
 const { getClient: getRedisClient } = require('./redis');
-const { consumeCredits } = require('./rpcHardcap');
+const { consumeCredits, rpcGate } = require('./rpcHardcap');
 
 const HELIUS_API_KEY = config.HELIUS_API_KEY;
+
+// φ-OPTIMIZATION: Drastically reduced to save Helius credits
+// Previous: maxPages default=10, max=50 → 1000-5000 credits/request
+// Now: maxPages default=3, max=8 → 300-800 credits/request (84% reduction!)
+const PNL_MAX_PAGES_DEFAULT = 3;  // Fibonacci: 3
+const PNL_MAX_PAGES_LIMIT = 8;    // Fibonacci: 8
 
 // Cache config
 const PNL_CACHE_TTL = 60; // 60 seconds
@@ -393,6 +399,10 @@ const IGNORED_ADDRESSES = new Set([
 
 /**
  * Fetch swap transactions for a wallet using Helius Enhanced Transactions API
+ *
+ * φ-OPTIMIZATION: Reduced maxPages dramatically to protect Helius credits
+ * Previous: default=10, max=50 → 1000-5000 credits/request
+ * Now: default=3, max=8 → 300-800 credits/request
  */
 async function fetchSwapTransactions(wallet, options = {}) {
     if (!HELIUS_API_KEY) {
@@ -402,10 +412,18 @@ async function fetchSwapTransactions(wallet, options = {}) {
 
     const allTxs = [];
     let before = null;
-    const maxPages = options.maxPages || 10; // Default 10 pages = 500 txs
+    // φ-OPTIMIZATION: Use constants and enforce limits
+    const maxPages = Math.min(options.maxPages || PNL_MAX_PAGES_DEFAULT, PNL_MAX_PAGES_LIMIT);
     const limit = options.limit || 50;
 
     for (let page = 0; page < maxPages; page++) {
+        // φ-GATE: Check budget before expensive API call (100 credits)
+        const gate = await rpcGate('getEnhancedTransactions');
+        if (!gate.allowed) {
+            logger.warn(`[PnL] RPC gate blocked for ${wallet.slice(0,8)}... page ${page} (${gate.reason})`);
+            break; // Return partial results instead of failing completely
+        }
+
         const params = new URLSearchParams({
             'api-key': HELIUS_API_KEY,
             'limit': limit.toString(),

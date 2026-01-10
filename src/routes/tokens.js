@@ -3382,9 +3382,11 @@ function init(deps) {
         }
 
         try {
+            // φ-OPTIMIZATION: Reduced maxPages to protect Helius credits
+            // Previous: default=10, max=50 → Now: default=3, max=8 (enforced in pnlService)
             const options = {
                 db, // Pass DB for pool price fallback
-                maxPages: Math.min(parseInt(req.query.maxPages) || 10, 50),
+                maxPages: Math.min(parseInt(req.query.maxPages) || 3, 8),
                 ...(req.query.since && { gtTime: parseInt(req.query.since) })
             };
 

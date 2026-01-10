@@ -1971,6 +1971,54 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/query
+     * Execute read-only SQL queries (for debugging/monitoring)
+     * SECURITY: Admin only, read-only (SELECT), no mutations allowed
+     * Workaround for Render MCP SSL issues
+     */
+    router.post('/admin/query', requireAdmin, async (req, res) => {
+        const { sql } = req.body;
+
+        if (!sql || typeof sql !== 'string') {
+            return res.status(400).json({ success: false, error: 'SQL query required' });
+        }
+
+        // SECURITY: Only allow SELECT statements (read-only)
+        const normalized = sql.trim().toLowerCase();
+        if (!normalized.startsWith('select')) {
+            return res.status(403).json({
+                success: false,
+                error: 'Only SELECT queries allowed (read-only)'
+            });
+        }
+
+        // SECURITY: Block dangerous patterns
+        const dangerous = ['drop', 'delete', 'update', 'insert', 'alter', 'truncate', 'create', 'grant', 'revoke'];
+        for (const pattern of dangerous) {
+            if (normalized.includes(pattern)) {
+                return res.status(403).json({
+                    success: false,
+                    error: `Forbidden pattern: ${pattern}`
+                });
+            }
+        }
+
+        try {
+            const result = await db.all(sql);
+            res.json({
+                success: true,
+                rows: result,
+                count: result.length
+            });
+        } catch (e) {
+            res.status(500).json({
+                success: false,
+                error: e.message
+            });
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

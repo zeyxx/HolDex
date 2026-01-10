@@ -1755,6 +1755,76 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/init-genesis-nodes
+     * Initialize genesis nodes from config into database
+     */
+    router.post('/admin/init-genesis-nodes', requireAdmin, async (req, res) => {
+        try {
+            const nodeApproval = require('../services/nodeApproval');
+            const genesis = require('../config/genesis');
+
+            // Get genesis node IDs
+            const genesisIds = genesis.getGenesisNodeIds();
+            const results = { initialized: [], errors: [] };
+
+            for (const nodeId of genesisIds) {
+                const node = genesis.getGenesisNode(nodeId);
+                const now = Date.now();
+
+                try {
+                    await db.run(`
+                        INSERT INTO nodes (
+                            node_id, name, operator, status,
+                            node_public_key, node_key_fingerprint,
+                            is_genesis, approval_status, approved_at,
+                            capabilities, joined_at, last_heartbeat,
+                            credits
+                        )
+                        VALUES ($1, $2, $3, 'active', $4, $5, TRUE, 'approved', $6, $7, $6, $6, 1.618033988749895)
+                        ON CONFLICT (node_id) DO UPDATE SET
+                            name = EXCLUDED.name,
+                            operator = EXCLUDED.operator,
+                            node_public_key = COALESCE(EXCLUDED.node_public_key, nodes.node_public_key),
+                            node_key_fingerprint = COALESCE(EXCLUDED.node_key_fingerprint, nodes.node_key_fingerprint),
+                            is_genesis = TRUE,
+                            approval_status = 'approved',
+                            status = 'active',
+                            credits = COALESCE(nodes.credits, 1.618033988749895)
+                    `, [
+                        node.id,
+                        node.name,
+                        node.operator,
+                        node.publicKey,
+                        node.fingerprint,
+                        now,
+                        JSON.stringify(node.capabilities)
+                    ]);
+
+                    results.initialized.push({
+                        id: node.id,
+                        name: node.name,
+                        operator: node.operator,
+                        fingerprint: node.fingerprint
+                    });
+                } catch (e) {
+                    results.errors.push({ id: node.id, error: e.message });
+                }
+            }
+
+            logger.info(`[Genesis] Initialized ${results.initialized.length} genesis nodes`);
+
+            res.json({
+                success: results.errors.length === 0,
+                message: `Initialized ${results.initialized.length} genesis nodes`,
+                results
+            });
+        } catch (e) {
+            logger.error(`[Genesis] Init failed: ${e.message}`);
+            res.status(500).json({ success: false, error: e.message });
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

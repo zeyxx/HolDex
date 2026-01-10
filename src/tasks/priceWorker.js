@@ -149,7 +149,7 @@ async function runPriceUpdateCycle(db, broadcast) {
 
             try {
                 // Single batch UPDATE using unnest arrays
-                const result = await db.run(`
+                await db.run(`
                     UPDATE tokens AS t SET
                         priceusd = CASE WHEN v.price::numeric > 0 THEN v.price ELSE t.priceusd END,
                         marketcap = CASE WHEN v.mcap::numeric > 0 THEN v.mcap ELSE t.marketcap END,

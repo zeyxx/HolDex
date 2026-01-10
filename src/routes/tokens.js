@@ -1876,7 +1876,7 @@ function init(deps) {
                 try {
                     await db.run(sql);
                     const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1];
-                    results.columns.push(`tokens.${col}` || 'column');
+                    results.columns.push(col ? `tokens.${col}` : 'column');
                 } catch (e) {
                     results.errors.push({ type: 'column', error: e.message });
                 }
@@ -1902,7 +1902,6 @@ function init(deps) {
      */
     router.post('/admin/init-genesis-nodes', requireAdmin, async (req, res) => {
         try {
-            const nodeApproval = require('../services/nodeApproval');
             const genesis = require('../config/genesis');
 
             // Get genesis node IDs

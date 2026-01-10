@@ -116,7 +116,7 @@ async function reportMetrics() {
             timeout: 10000
         };
 
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve, _reject) => {
             const req = https.request(options, (res) => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
@@ -203,7 +203,7 @@ async function sendEvent(eventType, data) {
             req.end();
         });
 
-    } catch (e) {
+    } catch (_e) {
         return null;
     }
 }

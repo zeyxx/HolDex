@@ -6,7 +6,6 @@
  */
 
 const { Connection, PublicKey } = require('@solana/web3.js');
-const logger = require('../logger');
 
 class HeliusProvider {
     constructor(apiKey) {

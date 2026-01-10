@@ -157,7 +157,7 @@ class PublicProvider {
                 latency: Date.now() - start,
                 endpoint: this.getCurrentEndpoint()
             };
-        } catch (e) {
+        } catch (_e) {
             // Try rotating and checking again
             this.rotateEndpoint();
             try {

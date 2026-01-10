@@ -68,7 +68,7 @@ class RPCProvider {
     /**
      * Execute a method with automatic failover
      */
-    async executeWithFallback(method, args, options = {}) {
+    async executeWithFallback(method, args, _options = {}) {
         if (!this.initialized) this.initialize();
 
         const errors = [];

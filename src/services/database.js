@@ -426,6 +426,65 @@ async function initDB() {
                     -- Simple unique: one verification per node per token
                     UNIQUE(mint, node_id)
                 );
+
+                -- ═══════════════════════════════════════════════════════════
+                -- SIGNAL ACCUMULATOR: 17-Dimension Pre-Judgment System
+                -- "FREE webhooks → Judge → RPC only for winners"
+                -- ═══════════════════════════════════════════════════════════
+
+                CREATE TABLE IF NOT EXISTS token_signals (
+                    mint                TEXT PRIMARY KEY,
+                    swap_count          INTEGER DEFAULT 0,
+                    transfer_count      INTEGER DEFAULT 0,
+                    unique_wallets      JSONB DEFAULT '[]'::jsonb,
+                    unique_wallet_count INTEGER DEFAULT 0,
+                    first_seen          BIGINT NOT NULL,
+                    last_seen           BIGINT NOT NULL,
+                    amounts             JSONB DEFAULT '[]'::jsonb,
+                    amount_variance     REAL DEFAULT 0,
+                    sources             JSONB DEFAULT '[]'::jsonb,
+                    wallet_e_scores     JSONB DEFAULT '[]'::jsonb,
+                    avg_wallet_e_score  REAL DEFAULT 0,
+                    pre_score           REAL DEFAULT 0,
+                    judgment_status     TEXT DEFAULT 'pending',
+                    judgment_reason     TEXT,
+                    judgment_at         BIGINT,
+                    dimension_scores    JSONB DEFAULT '{}'::jsonb,
+                    node_signals        JSONB DEFAULT '{}'::jsonb,
+                    nodes_seen          JSONB DEFAULT '[]'::jsonb,
+                    created_at          BIGINT NOT NULL,
+                    updated_at          BIGINT NOT NULL,
+                    promoted_at         BIGINT,
+                    promoted_reason     TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS judgment_history (
+                    id                  SERIAL PRIMARY KEY,
+                    mint                TEXT NOT NULL,
+                    action              TEXT NOT NULL,
+                    pre_score           REAL NOT NULL,
+                    dimension_scores    JSONB NOT NULL,
+                    signal_snapshot     JSONB NOT NULL,
+                    content_hash        TEXT,
+                    merkle_proof        JSONB,
+                    was_correct         BOOLEAN,
+                    k_score_outcome     REAL,
+                    feedback_at         BIGINT,
+                    created_at          BIGINT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS judgment_thresholds (
+                    dimension           TEXT PRIMARY KEY,
+                    threshold           REAL NOT NULL,
+                    weight              REAL NOT NULL,
+                    phi_default         REAL NOT NULL,
+                    adjustments         JSONB DEFAULT '[]'::jsonb,
+                    last_tuned          BIGINT,
+                    true_positives      INTEGER DEFAULT 0,
+                    false_positives     INTEGER DEFAULT 0,
+                    true_negatives      INTEGER DEFAULT 0,
+                    false_negatives     INTEGER DEFAULT 0
+                );
             `);
 
             // Add new columns if they don't exist (migration-safe)
@@ -667,6 +726,17 @@ async function initDB() {
                 `CREATE INDEX IF NOT EXISTS idx_watchlist_mint ON user_watchlists (mint)`,
                 // Alert queries (for background worker)
                 `CREATE INDEX IF NOT EXISTS idx_watchlist_alerts ON user_watchlists (alert_threshold) WHERE alert_threshold IS NOT NULL`,
+                // ═══════════════════════════════════════════════════════════
+                // SIGNAL ACCUMULATOR INDEXES (17-Dimension Pre-Judgment)
+                // ═══════════════════════════════════════════════════════════
+                `CREATE INDEX IF NOT EXISTS idx_signals_status ON token_signals(judgment_status)`,
+                `CREATE INDEX IF NOT EXISTS idx_signals_pre_score ON token_signals(pre_score DESC)`,
+                `CREATE INDEX IF NOT EXISTS idx_signals_first_seen ON token_signals(first_seen)`,
+                `CREATE INDEX IF NOT EXISTS idx_signals_updated ON token_signals(updated_at DESC)`,
+                `CREATE INDEX IF NOT EXISTS idx_signals_pending ON token_signals(pre_score DESC) WHERE judgment_status = 'pending'`,
+                `CREATE INDEX IF NOT EXISTS idx_judgment_mint ON judgment_history(mint)`,
+                `CREATE INDEX IF NOT EXISTS idx_judgment_action ON judgment_history(action)`,
+                `CREATE INDEX IF NOT EXISTS idx_judgment_feedback ON judgment_history(was_correct) WHERE was_correct IS NOT NULL`,
             ];
 
             for (const sql of migrations) {
@@ -715,6 +785,44 @@ async function initDB() {
                     `, [opType, baseFee, cost, minFee, maxDiscount]);
                 }
                 logger.info('⚗️ Harmony: Seeded operation costs (φ-ratio efficiency floor)');
+            }
+
+            // Seed judgment thresholds with φ-aligned defaults (17 dimensions)
+            const existingThresholds = await primaryPool.query('SELECT COUNT(*) as count FROM judgment_thresholds');
+            if (parseInt(existingThresholds.rows[0].count) === 0) {
+                const PHI = 1.618033988749895;
+                const seedThresholds = [
+                    // dimension, threshold, weight, phi_default
+                    // PRIMARY (φ² weight = 2.618)
+                    ['truth', 70, PHI * PHI, 70],
+                    ['relevance', 60, PHI * PHI, 60],
+                    ['quality', 70, PHI * PHI, 70],
+                    ['coherence', 75, PHI * PHI, 75],
+                    ['progress', 50, PHI * PHI, 50],
+                    ['ethics', 80, PHI * PHI * PHI, 80],  // φ³ for critical
+                    ['harmony', 60, PHI * PHI, 60],
+                    // SECONDARY (φ weight = 1.618)
+                    ['security', 85, PHI, 85],
+                    ['privacy', 90, PHI * PHI * PHI, 90],  // φ³ for critical
+                    ['scalability', 50, PHI, 50],
+                    ['simplicity', 60, PHI, 60],
+                    ['autonomy', 40, PHI, 40],
+                    // META (1.0 weight)
+                    ['self_awareness', 50, 1.0, 50],
+                    ['learning_rate', 50, 1.0, 50],
+                    ['singularity', 30, 1.0, 30],
+                    // DISTRIBUTED (φ weight = 1.618)
+                    ['node_consensus', 60, PHI, 60],
+                    ['signal_coverage', 50, PHI, 50]
+                ];
+                for (const [dim, threshold, weight, phiDefault] of seedThresholds) {
+                    await primaryPool.query(`
+                        INSERT INTO judgment_thresholds (dimension, threshold, weight, phi_default)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (dimension) DO NOTHING
+                    `, [dim, threshold, weight, phiDefault]);
+                }
+                logger.info('📐 Signal Accumulator: Seeded 17-dimension φ-aligned thresholds');
             }
 
             // Clean up auto-generated nodes with unknown operators

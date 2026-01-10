@@ -38,15 +38,15 @@ async function initDB() {
                 }
             }
 
-            // SCALABILITY FIX: Reduced max connections from 50 to 10.
-            // With 3 services (API, Worker, Listener) running, 50 * 3 = 150 connections
-            // which exceeds standard Render/Postgres limits (usually 100).
+            // SCALABILITY FIX: Pool size tuned for Render basic_256mb plan (max 22 connections)
+            // With 3 services (API, Calculator, Worker), pool = 7 × 3 = 21 connections (under limit)
+            // Previous value of 10 caused connection exhaustion (10 × 3 = 30 > 22)
             primaryPool = new Pool({
                 connectionString: config.DATABASE_URL,
                 ssl: sslConfig,
-                max: 10, 
+                max: 7,
                 idleTimeoutMillis: 30000,
-                connectionTimeoutMillis: 5000,
+                connectionTimeoutMillis: 10000, // Increased from 5s to 10s for burst handling
             });
 
             primaryPool.on('error', (err) => logger.error(`Unexpected error on Primary DB: ${err.message}`));

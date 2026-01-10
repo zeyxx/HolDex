@@ -100,8 +100,10 @@ async function addToPending(mint, source = 'unknown') {
  *
  * @param {string} mint - Token mint address
  * @param {string} trigger - What triggered promotion (e.g., 'swap', 'lp')
+ * @param {Object} options - Optional settings
+ * @param {boolean} options.skipDbCheck - Skip DB existence check if caller already verified (saves 1 DB call)
  */
-async function promoteToQueue(mint, trigger = 'swap') {
+async function promoteToQueue(mint, trigger = 'swap', options = {}) {
     const redis = getClient();
     if (!redis) return false;
 
@@ -109,19 +111,29 @@ async function promoteToQueue(mint, trigger = 'swap') {
         // Check if in pending
         const inPending = await redis.sismember(PENDING_KEY, mint);
 
-        // Also check if already in queue or DB
-        const [inQueue, inDb] = await Promise.all([
-            redis.sismember(QUEUE_KEY, mint),
-            getDB().get('SELECT mint FROM tokens WHERE mint = $1', [mint])
-        ]);
-
-        if (inQueue || inDb) {
-            // Already promoted or exists - clean up pending if present
+        // Check if already in queue (Redis-only, fast)
+        const inQueue = await redis.sismember(QUEUE_KEY, mint);
+        if (inQueue) {
+            // Already in queue - clean up pending if present
             if (inPending) {
                 await redis.srem(PENDING_KEY, mint);
                 await redis.hdel(PENDING_DATA_KEY, mint);
             }
             return false;
+        }
+
+        // DB check: Skip if caller already verified (e.g., webhook already checked)
+        // This optimization saves ~1 DB query per webhook event
+        if (!options.skipDbCheck) {
+            const inDb = await getDB().get('SELECT mint FROM tokens WHERE mint = $1', [mint]);
+            if (inDb) {
+                // Exists in DB - clean up pending if present
+                if (inPending) {
+                    await redis.srem(PENDING_KEY, mint);
+                    await redis.hdel(PENDING_DATA_KEY, mint);
+                }
+                return false;
+            }
         }
 
         // Get pending data for source info

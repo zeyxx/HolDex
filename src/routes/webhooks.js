@@ -670,7 +670,8 @@ function init(deps) {
 
                                 if (action === 'ACCEPT') {
                                     // Token passed 17-dimension judgment → Promote to queue
-                                    const promoted = await promoteToQueue(mint, `judgment:${preScore}`);
+                                    // skipDbCheck: true because we already verified !exists at line 611-627
+                                    const promoted = await promoteToQueue(mint, `judgment:${preScore}`, { skipDbCheck: true });
                                     if (promoted) {
                                         logger.info(`✅ [Judge] ${mint.slice(0, 8)} ACCEPTED (score: ${preScore}) → active queue`);
                                         stats.tokensDiscovered++;
@@ -688,7 +689,8 @@ function init(deps) {
                             // Fallback to simple SWAP-based logic if accumulator fails
                             if (eventType === 'SWAP') {
                                 try {
-                                    const promoted = await promoteToQueue(mint, 'swap_fallback');
+                                    // skipDbCheck: true because we already verified !exists at line 611-627
+                                    const promoted = await promoteToQueue(mint, 'swap_fallback', { skipDbCheck: true });
                                     if (promoted) {
                                         logger.info(`🚀 [${source}] SWAP fallback: ${mint.slice(0, 8)} → active queue`);
                                         stats.tokensDiscovered++;

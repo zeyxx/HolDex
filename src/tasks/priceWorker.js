@@ -142,7 +142,7 @@ async function runPriceUpdateCycle(db, broadcast) {
                 changes1h.push(pd.change1h || null);
                 changes5m.push(pd.change5m || null);
                 sources.push(pd.source || 'jupiter');
-                timestamps.push(pd.timestamp ? pd.timestamp.toString() : Date.now().toString());
+                timestamps.push(pd.timestamp ? parseInt(pd.timestamp) : Date.now());
                 pools.push(pd.pairAddress || null);
             }
 
@@ -158,10 +158,10 @@ async function runPriceUpdateCycle(db, broadcast) {
                         change1h = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.c1h, t.change1h) ELSE t.change1h END,
                         change5m = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.c5m, t.change5m) ELSE t.change5m END,
                         price_source = CASE WHEN v.price::numeric > 0 THEN v.src ELSE t.price_source END,
-                        price_timestamp = CASE WHEN v.price::numeric > 0 THEN v.ts ELSE t.price_timestamp END,
+                        price_timestamp = CASE WHEN v.price::numeric > 0 THEN v.ts::bigint ELSE t.price_timestamp END,
                         price_pool = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.pool, t.price_pool) ELSE t.price_pool END,
                         liquidity_source = CASE WHEN v.liq::numeric > 0 THEN v.src ELSE t.liquidity_source END,
-                        liquidity_timestamp = CASE WHEN v.liq::numeric > 0 THEN v.ts ELSE t.liquidity_timestamp END,
+                        liquidity_timestamp = CASE WHEN v.liq::numeric > 0 THEN v.ts::bigint ELSE t.liquidity_timestamp END,
                         sig_market = NULL
                     FROM (
                         SELECT
@@ -174,7 +174,7 @@ async function runPriceUpdateCycle(db, broadcast) {
                             unnest($7::numeric[]) as c1h,
                             unnest($8::numeric[]) as c5m,
                             unnest($9::text[]) as src,
-                            unnest($10::text[]) as ts,
+                            unnest($10::bigint[]) as ts,
                             unnest($11::text[]) as pool
                     ) AS v
                     WHERE t.mint = v.mint

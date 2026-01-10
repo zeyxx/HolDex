@@ -508,6 +508,53 @@ function init(deps) {
         }
     });
 
+    /**
+     * GET /health/rpc/credits
+     * RPC credit usage monitoring - per-node breakdown and historical stats
+     */
+    router.get('/health/rpc/credits', cacheControl(30, 60), proxyRateLimit, async (req, res) => {
+        try {
+            const rpcMonitor = require('../services/rpcMonitor');
+            const { history } = req.query;
+
+            // Get current usage
+            const current = await rpcMonitor.getUsageStats();
+
+            // Optionally include historical data
+            let historical = null;
+            if (history === 'true' || history === '1') {
+                historical = await rpcMonitor.getHistoricalStats();
+            }
+
+            // Determine status based on usage
+            let status = 'ok';
+            if (current) {
+                if (current.hourly.percent >= 95 || current.daily.percent >= 95) {
+                    status = 'critical';
+                } else if (current.hourly.percent >= 80 || current.daily.percent >= 80) {
+                    status = 'warning';
+                }
+            }
+
+            res.json({
+                success: true,
+                status,
+                timestamp: new Date().toISOString(),
+                current: current || { error: 'Redis unavailable' },
+                historical: historical,
+                budget: rpcMonitor.BUDGET,
+                creditCosts: rpcMonitor.CREDIT_COSTS
+            });
+        } catch (e) {
+            logger.error(`[RPC Credits] Check failed: ${e.message}`);
+            res.status(500).json({
+                success: false,
+                error: 'RPC credits check failed',
+                message: e.message
+            });
+        }
+    });
+
     // PUBLIC: Candle Chart
     router.get('/token/:mint/candles', cacheControl(30, 60), unifiedRateLimiter, async (req, res) => {
         const { mint } = req.params;

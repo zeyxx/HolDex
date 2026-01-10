@@ -237,6 +237,9 @@ async function getHolderCountFromRPC(mintAddress) {
 /**
  * Analyze token holder behavior for conviction metrics
  * Uses L2 Multi-RPC with automatic failover
+ *
+ * NOTE: Uses getSignaturesForAddress (faster for timestamp-only queries)
+ * For full parsed transaction data, use provider.getTransactionsForAddress()
  */
 async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
     const provider = getRPCProvider();
@@ -261,13 +264,13 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
             if (excludeSet.has(acc.address.toString())) continue;
 
             try {
-                // Use provider's getSignaturesForAddress with fallback
+                // getSignaturesForAddress is optimal for timestamp-only queries (168ms vs 1000ms+)
                 const signatures = await provider.getSignaturesForAddress(acc.address, { limit: 50 });
 
                 // Track RPC call
                 rpcMonitor.trackRpcCall('getSignaturesForAddress', 1, { address: acc.address.toString() }).catch(() => {});
 
-                if (signatures.length > 0) {
+                if (signatures && signatures.length > 0) {
                     const oldestTx = signatures[signatures.length - 1];
                     const txTime = oldestTx.blockTime || nowSec;
                     totalDuration += (nowSec - txTime);

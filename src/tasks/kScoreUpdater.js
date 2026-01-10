@@ -39,6 +39,7 @@ const nodeKeys = require('../utils/nodeKeys');
 const rpcMonitor = require('../services/rpcMonitor');
 const { waitForRateLimit: waitForGlobalRateLimit } = require('../services/heliusRateLimiter');
 const { recordJudgmentOutcome } = require('../services/signalAccumulator');
+const { consumeCredits } = require('../services/rpcHardcap');
 
 // ============================================
 // HELIUS CONFIG
@@ -820,8 +821,11 @@ async function heliusRpc(method, params) {
         const data = await response.json();
         if (data.error) throw new Error(data.error.message);
 
-        // Track RPC call for monitoring with correct credit cost
-        rpcMonitor.trackRpcCall(method, rpcMonitor.getCreditCost(method)).catch(() => {});
+        // Track RPC call for HARDCAP enforcement
+        const creditCost = rpcMonitor.getCreditCost(method);
+        consumeCredits(method, creditCost).catch(() => {});
+        // Also track in legacy monitor for backward compatibility
+        rpcMonitor.trackRpcCall(method, creditCost).catch(() => {});
 
         return data.result;
     } catch (error) {
@@ -927,6 +931,10 @@ async function getEnhancedTransactions(address, options = {}) {
 
     try {
         const response = await rateLimitedFetch(url, { method: 'GET' });
+
+        // Track Enhanced Transactions API credits (100 credits per call!)
+        consumeCredits('helius:getEnhancedTransactions', 100).catch(() => {});
+
         if (!response.ok) return [];
         return await response.json();
     } catch (_error) {

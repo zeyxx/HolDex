@@ -118,8 +118,9 @@ const BUDGET = calculateBudgets(CURRENT_PLAN.credits);
 const BASE_TTL = 60; // 1 minute in seconds
 
 const CACHE_TTL = Object.freeze({
-    // Price data (volatile)
-    PRICE: Math.round(BASE_TTL * PHI_POWERS.PHI_INV),           // ~37s
+    // Price data (volatile → extended to save RPC credits)
+    // Trade-off: Slightly stale prices vs 8x credit savings
+    PRICE: Math.round(BASE_TTL * PHI * 3),                       // ~5min (same as SOL, saves 8x credits)
     SOL_PRICE: Math.round(BASE_TTL * PHI * 3),                   // ~5min (Pyth Oracle)
 
     // Holder data (normal volatility)

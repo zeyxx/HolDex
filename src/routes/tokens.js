@@ -1255,6 +1255,338 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/migrate-kei-phi
+     * Run the K-E-I-Φ migration (nodes, verifications, rewards, infrastructure)
+     * Creates distributed polling network tables
+     */
+    router.post('/admin/migrate-kei-phi', requireAdmin, async (req, res) => {
+        const results = { tables: [], indexes: [], seeds: [], errors: [] };
+
+        try {
+            // ═══════════════════════════════════════════════════════════════
+            // PART 1: NODE NETWORK TABLES
+            // ═══════════════════════════════════════════════════════════════
+
+            // NODES TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS nodes (
+                    node_id TEXT PRIMARY KEY,
+                    name TEXT,
+                    operator TEXT,
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'degraded', 'offline', 'banned')),
+                    node_public_key TEXT,
+                    node_key_fingerprint TEXT UNIQUE,
+                    is_genesis BOOLEAN DEFAULT FALSE,
+                    approval_status TEXT DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved', 'rejected', 'expired')),
+                    required_approvals INTEGER DEFAULT 2,
+                    current_approvals INTEGER DEFAULT 0,
+                    approval_expires_at BIGINT,
+                    approved_at BIGINT,
+                    capabilities JSONB DEFAULT '["polling", "verification"]'::jsonb,
+                    verifications_count INTEGER DEFAULT 0,
+                    consensus_count INTEGER DEFAULT 0,
+                    uptime_percent DECIMAL(5,2) DEFAULT 100.0,
+                    last_heartbeat BIGINT,
+                    participant_wallet TEXT,
+                    work_verifications INTEGER DEFAULT 0,
+                    work_consensus_participated INTEGER DEFAULT 0,
+                    work_uptime_hours DECIMAL(10,2) DEFAULT 0,
+                    work_score DECIMAL(10,2) DEFAULT 0,
+                    joined_at BIGINT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('nodes');
+
+            // NODE APPROVALS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS node_approvals (
+                    id SERIAL PRIMARY KEY,
+                    node_id TEXT NOT NULL REFERENCES nodes(node_id) ON DELETE CASCADE,
+                    approved_by TEXT NOT NULL REFERENCES nodes(node_id),
+                    approval_signature TEXT NOT NULL,
+                    approved_at BIGINT NOT NULL,
+                    UNIQUE(node_id, approved_by)
+                )
+            `);
+            results.tables.push('node_approvals');
+
+            // TOKEN VERIFICATIONS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS token_verifications (
+                    id SERIAL PRIMARY KEY,
+                    mint TEXT NOT NULL,
+                    node_id TEXT NOT NULL REFERENCES nodes(node_id),
+                    k_score INTEGER NOT NULL,
+                    node_signature TEXT,
+                    verified_at BIGINT NOT NULL,
+                    UNIQUE(mint, node_id)
+                )
+            `);
+            results.tables.push('token_verifications');
+
+            // CONSENSUS SNAPSHOTS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS consensus_snapshots (
+                    mint TEXT PRIMARY KEY,
+                    k_score_consensus INTEGER NOT NULL,
+                    agreeing_nodes INTEGER NOT NULL,
+                    total_nodes INTEGER NOT NULL,
+                    consensus_at BIGINT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('consensus_snapshots');
+
+            // Add K-Score signature fields to tokens table
+            await db.run(`
+                ALTER TABLE tokens
+                ADD COLUMN IF NOT EXISTS sig_node_id TEXT,
+                ADD COLUMN IF NOT EXISTS sig_node_signature TEXT,
+                ADD COLUMN IF NOT EXISTS sig_node_timestamp BIGINT,
+                ADD COLUMN IF NOT EXISTS last_k_score_update BIGINT,
+                ADD COLUMN IF NOT EXISTS k_score_consensus_nodes INTEGER DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS k_score_confidence DECIMAL(5,4) DEFAULT 0
+            `);
+            results.tables.push('tokens (extended)');
+
+            // ═══════════════════════════════════════════════════════════════
+            // PART 2: NODE REWARDS TABLES
+            // ═══════════════════════════════════════════════════════════════
+
+            // REWARD CLAIMS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS reward_claims (
+                    id SERIAL PRIMARY KEY,
+                    node_id TEXT NOT NULL REFERENCES nodes(node_id),
+                    amount DECIMAL(18,8) NOT NULL,
+                    period_start BIGINT NOT NULL,
+                    period_end BIGINT NOT NULL,
+                    claim_signature TEXT,
+                    claimed_at BIGINT,
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'claimed', 'failed')),
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('reward_claims');
+
+            // NODE REWARDS HISTORY
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS node_rewards_history (
+                    id SERIAL PRIMARY KEY,
+                    distribution_id INTEGER,
+                    node_id TEXT NOT NULL REFERENCES nodes(node_id),
+                    e_score DECIMAL(10,2) NOT NULL,
+                    work_score DECIMAL(10,2) NOT NULL,
+                    share_amount DECIMAL(18,8) NOT NULL,
+                    pool_total DECIMAL(18,8) NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('node_rewards_history');
+
+            // ═══════════════════════════════════════════════════════════════
+            // PART 3: INFRASTRUCTURE MONITORING TABLES
+            // ═══════════════════════════════════════════════════════════════
+
+            // INFRA LIQUIDITY TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS infra_liquidity (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    total_liquidity DECIMAL(24,8) NOT NULL,
+                    liquidity_24h_change DECIMAL(10,4) DEFAULT 0,
+                    pool_count INTEGER DEFAULT 0,
+                    recorded_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('infra_liquidity');
+
+            // ORACLE PRICES TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS oracle_prices (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    price DECIMAL(24,12) NOT NULL,
+                    confidence DECIMAL(5,4) DEFAULT 0.95,
+                    source TEXT NOT NULL,
+                    last_update TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('oracle_prices');
+
+            // INFRA HEALTH CHECKS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS infra_health_checks (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    is_available BOOLEAN DEFAULT TRUE,
+                    response_time_ms INTEGER,
+                    uptime_percent DECIMAL(5,2) DEFAULT 100,
+                    checked_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('infra_health_checks');
+
+            // INFRA ALERTS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS infra_alerts (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    alert_level TEXT NOT NULL CHECK (alert_level IN ('healthy', 'warning', 'critical', 'offline', 'recovered')),
+                    score DECIMAL(5,2) NOT NULL,
+                    components JSONB,
+                    recorded_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('infra_alerts');
+
+            // INFRA SCORE HISTORY TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS infra_score_history (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    score DECIMAL(5,2) NOT NULL,
+                    d_liquidity DECIMAL(5,4),
+                    o_oracle DECIMAL(5,4),
+                    l_reliability DECIMAL(5,4),
+                    recorded_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('infra_score_history');
+
+            // FEE COLLECTIONS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS fee_collections (
+                    id SERIAL PRIMARY KEY,
+                    tx_signature TEXT UNIQUE,
+                    total_fee BIGINT NOT NULL,
+                    rewards_amount BIGINT NOT NULL,
+                    user_wallet TEXT,
+                    payment_token TEXT,
+                    collected_at BIGINT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('fee_collections');
+
+            // FEE DISTRIBUTIONS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS fee_distributions (
+                    id SERIAL PRIMARY KEY,
+                    period_start BIGINT NOT NULL,
+                    period_end BIGINT NOT NULL,
+                    total_pool BIGINT NOT NULL,
+                    nodes_amount BIGINT NOT NULL,
+                    users_amount BIGINT NOT NULL,
+                    devs_amount BIGINT NOT NULL,
+                    nodes_recipients INTEGER DEFAULT 0,
+                    users_recipients INTEGER DEFAULT 0,
+                    distributed_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('fee_distributions');
+
+            // DEV REWARDS POOL TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS dev_rewards_pool (
+                    id SERIAL PRIMARY KEY,
+                    amount BIGINT NOT NULL,
+                    period_start BIGINT NOT NULL,
+                    period_end BIGINT NOT NULL,
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'expired')),
+                    claimed_by TEXT,
+                    claimed_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            `);
+            results.tables.push('dev_rewards_pool');
+
+            // ═══════════════════════════════════════════════════════════════
+            // PART 4: INDEXES
+            // ═══════════════════════════════════════════════════════════════
+
+            const indexes = [
+                'CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status)',
+                'CREATE INDEX IF NOT EXISTS idx_nodes_approval ON nodes(approval_status)',
+                'CREATE INDEX IF NOT EXISTS idx_nodes_genesis ON nodes(is_genesis)',
+                'CREATE INDEX IF NOT EXISTS idx_nodes_wallet ON nodes(participant_wallet)',
+                'CREATE INDEX IF NOT EXISTS idx_verifications_mint ON token_verifications(mint)',
+                'CREATE INDEX IF NOT EXISTS idx_verifications_node ON token_verifications(node_id)',
+                'CREATE INDEX IF NOT EXISTS idx_verifications_time ON token_verifications(verified_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_reward_claims_node ON reward_claims(node_id)',
+                'CREATE INDEX IF NOT EXISTS idx_reward_claims_status ON reward_claims(status)',
+                'CREATE INDEX IF NOT EXISTS idx_infra_liquidity_symbol ON infra_liquidity(symbol)',
+                'CREATE INDEX IF NOT EXISTS idx_infra_liquidity_time ON infra_liquidity(recorded_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_oracle_prices_symbol ON oracle_prices(symbol)',
+                'CREATE INDEX IF NOT EXISTS idx_oracle_prices_time ON oracle_prices(last_update DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_infra_health_symbol ON infra_health_checks(symbol)',
+                'CREATE INDEX IF NOT EXISTS idx_infra_alerts_symbol ON infra_alerts(symbol)',
+                'CREATE INDEX IF NOT EXISTS idx_infra_alerts_level ON infra_alerts(alert_level)',
+                'CREATE INDEX IF NOT EXISTS idx_infra_score_symbol ON infra_score_history(symbol)',
+                'CREATE INDEX IF NOT EXISTS idx_fee_collections_time ON fee_collections(collected_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_fee_collections_wallet ON fee_collections(user_wallet)',
+                'CREATE INDEX IF NOT EXISTS idx_fee_distributions_time ON fee_distributions(distributed_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_dev_rewards_status ON dev_rewards_pool(status)'
+            ];
+
+            for (const sql of indexes) {
+                try {
+                    await db.run(sql);
+                    results.indexes.push(sql.match(/idx_\w+/)?.[0] || 'index');
+                } catch (e) {
+                    results.errors.push({ type: 'index', error: e.message });
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // PART 5: SEED INFRASTRUCTURE TOKENS
+            // ═══════════════════════════════════════════════════════════════
+
+            const infraTokens = ['SOL', 'USDC', 'USDT', 'wSOL', 'JitoSOL', 'mSOL', 'bSOL'];
+
+            for (const symbol of infraTokens) {
+                try {
+                    await db.run(`
+                        INSERT INTO infra_liquidity (symbol, total_liquidity, pool_count)
+                        VALUES ($1, 100000000, 10)
+                        ON CONFLICT DO NOTHING
+                    `, [symbol]);
+                    await db.run(`
+                        INSERT INTO oracle_prices (symbol, price, confidence, source)
+                        VALUES ($1, 1.0, 0.95, 'baseline')
+                    `, [symbol]);
+                    await db.run(`
+                        INSERT INTO infra_health_checks (symbol, is_available, response_time_ms, uptime_percent)
+                        VALUES ($1, TRUE, 100, 99.9)
+                    `, [symbol]);
+                    results.seeds.push(symbol);
+                } catch (e) {
+                    results.errors.push({ type: 'seed', symbol, error: e.message });
+                }
+            }
+
+            logger.info(`[Migration] K-E-I-Φ complete: ${results.tables.length} tables, ${results.indexes.length} indexes, ${results.seeds.length} seeds`);
+
+            res.json({
+                success: true,
+                message: `K-E-I-Φ Migration complete`,
+                phi: {
+                    value: 1.618033988749895,
+                    inv: 0.618033988749895,
+                    invSq: 0.381966011250105,
+                    invCubed: 0.236067977499790
+                },
+                results
+            });
+
+        } catch (e) {
+            logger.error(`[Migration] K-E-I-Φ failed: ${e.message}`);
+            res.status(500).json({ success: false, error: e.message, results });
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

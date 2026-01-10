@@ -3,7 +3,7 @@ const config = require('../config/env');
 const logger = require('./logger');
 const { getRedis } = require('./redis');
 const rpcMonitor = require('./rpcMonitor');
-const { waitForRateLimit } = require('./heliusRateLimiter');
+const { getRPCProvider, getConnection } = require('./rpcProvider');
 
 let connection = null;
 
@@ -131,8 +131,11 @@ async function fetchAccountsForProgram(conn, programId, mintAddress) {
 }
 
 /**
- * Get holder count using Helius API (paginated, works for any token size)
- * Falls back to standard RPC if Helius unavailable
+ * Get holder count using RPC Provider (Helius DAS with public fallback)
+ *
+ * Uses L2 Multi-RPC abstraction:
+ * - Helius DAS API for accurate paginated holder counts
+ * - Public RPC fallback for standard getProgramAccounts
  *
  * OPTIMIZATION: 5-minute Redis cache to reduce RPC calls
  * Saves ~50-100 calls/hour from website traffic
@@ -157,18 +160,13 @@ async function getHolderCountFromRPC(mintAddress) {
     }
 
     let finalCount = 0;
+    const provider = getRPCProvider();
 
-    // Try Helius API first (paginated, works for millions of holders)
-    if (config.HELIUS_API_KEY) {
+    // Try Helius DAS API first (paginated, works for millions of holders)
+    if (provider.hasHelius()) {
         try {
             let count = 0;
             let cursor = null;
-            // SECURITY: Use base URL without API key - key goes in Authorization header
-            const HELIUS_RPC = 'https://mainnet.helius-rpc.com';
-            const headers = {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.HELIUS_API_KEY}`
-            };
 
             // Paginate through holders (cap at 10 pages = 10k holders for efficiency)
             // Large tokens (USDT/USDC) have millions - sampling top 10k is sufficient
@@ -176,35 +174,23 @@ async function getHolderCountFromRPC(mintAddress) {
             let page = 0;
 
             while (page < MAX_PAGES) {
-                // P4: Global rate limit check before Helius call
-                await waitForRateLimit();
-
-                const params = { mint: cleanMint, limit: 1000 };
-                if (cursor) params.cursor = cursor;
-
-                const response = await fetch(HELIUS_RPC, {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify({
-                        jsonrpc: '2.0',
-                        id: Date.now(),
-                        method: 'getTokenAccounts',
-                        params
-                    })
+                // Provider handles rate limiting internally
+                const result = await provider.getTokenAccounts(cleanMint, {
+                    limit: 1000,
+                    cursor
                 });
 
                 // Track RPC call for monitoring
                 rpcMonitor.trackRpcCall('getTokenAccounts', 1, { mint: cleanMint }).catch(() => {});
 
-                const data = await response.json();
-                if (data.error || !data.result?.token_accounts) break;
+                if (!result?.token_accounts) break;
 
                 // Count accounts with balance > 0
-                for (const acc of data.result.token_accounts) {
+                for (const acc of result.token_accounts) {
                     if (acc.amount > 0) count++;
                 }
 
-                cursor = data.result.cursor;
+                cursor = result.cursor;
                 page++;
                 if (!cursor) break;
             }
@@ -213,19 +199,24 @@ async function getHolderCountFromRPC(mintAddress) {
                 finalCount = count;
             }
         } catch (e) {
-            logger.warn(`[Holders] Helius API failed for ${cleanMint.slice(0,8)}: ${e.message}`);
+            logger.warn(`[Holders] Helius DAS failed for ${cleanMint.slice(0,8)}: ${e.message}`);
         }
     }
 
-    // Fallback to standard RPC (may fail for large tokens)
+    // Fallback to standard RPC via provider (may fail for large tokens)
     if (finalCount === 0) {
-        const conn = getSolanaConnection();
-        let count = await fetchAccountsForProgram(conn, TOKEN_PROGRAM_ID, cleanMint);
-        if (count === 0) {
-            const count2022 = await fetchAccountsForProgram(conn, TOKEN_2022_PROGRAM_ID, cleanMint);
-            count += count2022;
+        try {
+            // Use provider's connection with automatic fallback
+            const conn = provider.getConnection();
+            let count = await fetchAccountsForProgram(conn, TOKEN_PROGRAM_ID, cleanMint);
+            if (count === 0) {
+                const count2022 = await fetchAccountsForProgram(conn, TOKEN_2022_PROGRAM_ID, cleanMint);
+                count += count2022;
+            }
+            finalCount = count;
+        } catch (e) {
+            logger.warn(`[Holders] Standard RPC failed for ${cleanMint.slice(0,8)}: ${e.message}`);
         }
-        finalCount = count;
     }
 
     // Cache the result (5 min TTL)
@@ -243,11 +234,16 @@ async function getHolderCountFromRPC(mintAddress) {
     return finalCount;
 }
 
+/**
+ * Analyze token holder behavior for conviction metrics
+ * Uses L2 Multi-RPC with automatic failover
+ */
 async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
-    const conn = getSolanaConnection();
+    const provider = getRPCProvider();
+
     try {
-        const mint = new PublicKey(mintAddress);
-        const largest = await retryRPC(() => conn.getTokenLargestAccounts(mint), 2, 2000);
+        // Use provider's getTokenLargestAccounts with fallback
+        const largest = await provider.getTokenLargestAccounts(mintAddress);
 
         // Track RPC call
         rpcMonitor.trackRpcCall('getTokenLargestAccounts', 1, { mint: mintAddress }).catch(() => {});
@@ -265,11 +261,11 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
             if (excludeSet.has(acc.address.toString())) continue;
 
             try {
-                const pubkey = new PublicKey(acc.address);
-                const signatures = await retryRPC(() => conn.getSignaturesForAddress(pubkey, { limit: 50 }), 2, 1000);
+                // Use provider's getSignaturesForAddress with fallback
+                const signatures = await provider.getSignaturesForAddress(acc.address, { limit: 50 });
 
                 // Track RPC call
-                rpcMonitor.trackRpcCall('getSignaturesForAddress', 1, { address: pubkey.toBase58() }).catch(() => {});
+                rpcMonitor.trackRpcCall('getSignaturesForAddress', 1, { address: acc.address.toString() }).catch(() => {});
 
                 if (signatures.length > 0) {
                     const oldestTx = signatures[signatures.length - 1];
@@ -289,8 +285,10 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
     }
 }
 
-module.exports = { 
-    getSolanaConnection, 
+module.exports = {
+    getSolanaConnection,  // Legacy: direct connection (for WebSocket listeners)
+    getConnection,        // L2: provider-managed connection with fallback
+    getRPCProvider,       // L2: full provider access
     analyzeTokenHolders,
     retryRPC,
     getHolderCountFromRPC

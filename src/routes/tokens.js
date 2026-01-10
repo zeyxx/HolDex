@@ -1825,6 +1825,25 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/fix-polling-tasks
+     * Rename task_id to id in polling_tasks table
+     */
+    router.post('/admin/fix-polling-tasks', requireAdmin, async (req, res) => {
+        try {
+            // Check if task_id exists, rename to id
+            await db.run(`ALTER TABLE polling_tasks RENAME COLUMN task_id TO id`);
+            res.json({ success: true, message: 'Renamed task_id to id' });
+        } catch (e) {
+            // Column might already be named correctly
+            if (e.message.includes('does not exist') || e.message.includes('already')) {
+                res.json({ success: true, message: 'Column already correct' });
+            } else {
+                res.status(500).json({ success: false, error: e.message });
+            }
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

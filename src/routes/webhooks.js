@@ -16,7 +16,7 @@ const { getClient } = require('../services/redis');
 const { isValidSolanaAddress, sanitizeError } = require('../utils/validation');
 const verification = require('../services/verificationService');
 const newTokenWebhook = require('../services/newTokenWebhook');
-const { queueNewToken } = require('../services/tokenQueue');
+const { queueNewToken, promoteToQueue } = require('../services/tokenQueue');
 // DISABLED: Direct indexing causes rate limit floods
 // const { indexTokenOnChain } = require('../services/indexer');
 
@@ -533,23 +533,38 @@ function init(deps) {
                         }
 
                         // ══════════════════════════════════════════════════════════
-                        // NEW TOKEN DISCOVERED!
+                        // HYBRID C+D: Route by event type
                         // ══════════════════════════════════════════════════════════
-                        logger.info(`✨ [${source}] New token: ${mint}`);
-                        stats.tokensDiscovered++;
-                        discovered++;
+                        const eventType = event.type || 'UNKNOWN';
 
-                        // Queue for rate-limited processing (prevents API floods)
-                        // tokenQueue.js will fetch real metadata THEN insert to DB
-                        // DO NOT insert placeholder here - it would cause queueNewToken to skip
-                        try {
-                            const queued = await queueNewToken(mint, source);
-                            if (!queued) {
-                                logger.debug(`[NewToken] ${mint.slice(0, 8)} already queued or processing`);
+                        if (eventType === 'SWAP') {
+                            // SWAP detected → Promote pending token to active queue
+                            // This is the trade-triggered activation (Stage 2)
+                            try {
+                                const promoted = await promoteToQueue(mint, 'swap');
+                                if (promoted) {
+                                    logger.info(`🚀 [${source}] SWAP triggered: ${mint.slice(0, 8)} → active queue`);
+                                    stats.tokensDiscovered++;
+                                    discovered++;
+                                }
+                            } catch (promoteErr) {
+                                logger.warn(`[NewToken] Promote failed for ${mint.slice(0, 8)}: ${promoteErr.message}`);
                             }
-                        } catch (queueErr) {
-                            logger.warn(`[NewToken] Queue failed for ${mint.slice(0, 8)}: ${queueErr.message}`);
-                            // Don't increment errors here - token was still discovered
+                        } else {
+                            // TOKEN_MINT or CREATE_POOL → Add to pending set (Stage 1)
+                            // No metadata fetch yet - wait for trade activity
+                            logger.info(`👁️ [${source}] Discovered: ${mint.slice(0, 8)} (awaiting trade)`);
+                            stats.tokensDiscovered++;
+                            discovered++;
+
+                            try {
+                                const queued = await queueNewToken(mint, source);
+                                if (!queued) {
+                                    logger.debug(`[NewToken] ${mint.slice(0, 8)} already pending or tracked`);
+                                }
+                            } catch (queueErr) {
+                                logger.warn(`[NewToken] Queue failed for ${mint.slice(0, 8)}: ${queueErr.message}`);
+                            }
                         }
 
                         // Add to grower scanner queue
@@ -640,37 +655,47 @@ function init(deps) {
             const { getProcessorStats } = require('../services/tokenQueue');
             const processorStats = getProcessorStats();
 
-            // Check the actual data in Redis
-            const keyType = await redis.type('holdex:new_token_queue');
-            const queueSize = await redis.scard('holdex:new_token_queue');
-            const processingSize = await redis.scard('holdex:processing_tokens');
-            const failedSize = await redis.scard('holdex:failed_tokens');
+            // Check the actual data in Redis (Hybrid C+D design)
+            const [
+                pendingSize,        // Stage 1: Awaiting trade
+                activeQueueSize,    // Stage 2: Promoted for processing
+                processingSize,
+                failedSize
+            ] = await Promise.all([
+                redis.scard('holdex:pending_mints'),
+                redis.scard('holdex:new_token_queue'),
+                redis.scard('holdex:processing_tokens'),
+                redis.scard('holdex:failed_tokens')
+            ]);
 
-            // Try to get some sample members
-            let sampleMembers = [];
-            let randomSample = [];
+            // Sample pending mints (Stage 1)
+            let pendingSample = [];
             try {
-                sampleMembers = await redis.smembers('holdex:new_token_queue');
-                sampleMembers = sampleMembers.slice(0, 5);
+                pendingSample = await redis.srandmember('holdex:pending_mints', 3);
             } catch (e) {
-                sampleMembers = [`smembers error: ${e.message}`];
+                pendingSample = [`error: ${e.message}`];
             }
 
+            // Sample active queue (Stage 2)
+            let activeSample = [];
             try {
-                randomSample = await redis.srandmember('holdex:new_token_queue', 5);
+                activeSample = await redis.srandmember('holdex:new_token_queue', 3);
             } catch (e) {
-                randomSample = [`srandmember error: ${e.message}`];
+                activeSample = [`error: ${e.message}`];
             }
 
             res.json({
+                design: 'Hybrid C+D (Trade-Triggered + TTL)',
                 processor: processorStats,
                 redis: {
-                    keyType,
-                    queueSize,
-                    processingSize,
-                    failedSize,
-                    sampleMembers,
-                    randomSample
+                    stage1_pending: pendingSize,     // Awaiting trade (TTL 30min)
+                    stage2_active: activeQueueSize,  // Promoted for processing
+                    processing: processingSize,
+                    failed: failedSize,
+                    samples: {
+                        pending: pendingSample,
+                        active: activeSample
+                    }
                 },
                 timestamp: Date.now()
             });

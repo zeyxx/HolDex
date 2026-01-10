@@ -6,6 +6,7 @@
  */
 
 const { Connection, PublicKey } = require('@solana/web3.js');
+const { trackRpcCall, getCreditCost } = require('../rpcMonitor');
 
 class HeliusProvider {
     constructor(apiKey) {
@@ -49,25 +50,33 @@ class HeliusProvider {
     async getAccountInfo(pubkey) {
         const conn = this.getConnection();
         const pk = typeof pubkey === 'string' ? new PublicKey(pubkey) : pubkey;
-        return conn.getAccountInfo(pk);
+        const result = await conn.getAccountInfo(pk);
+        trackRpcCall('getAccountInfo', 1);
+        return result;
     }
 
     async getMultipleAccountsInfo(pubkeys) {
         const conn = this.getConnection();
         const pks = pubkeys.map(p => typeof p === 'string' ? new PublicKey(p) : p);
-        return conn.getMultipleAccountsInfo(pks);
+        const result = await conn.getMultipleAccountsInfo(pks);
+        trackRpcCall('getMultipleAccounts', pks.length); // 1 credit per account
+        return result;
     }
 
     async getTokenLargestAccounts(mint) {
         const conn = this.getConnection();
         const pk = typeof mint === 'string' ? new PublicKey(mint) : mint;
-        return conn.getTokenLargestAccounts(pk);
+        const result = await conn.getTokenLargestAccounts(pk);
+        trackRpcCall('getTokenLargestAccounts', 1);
+        return result;
     }
 
     async getSignaturesForAddress(address, options = {}) {
         const conn = this.getConnection();
         const pk = typeof address === 'string' ? new PublicKey(address) : address;
-        return conn.getSignaturesForAddress(pk, options);
+        const result = await conn.getSignaturesForAddress(pk, options);
+        trackRpcCall('getSignaturesForAddress', 1);
+        return result;
     }
 
     /**
@@ -96,7 +105,9 @@ class HeliusProvider {
     async getProgramAccounts(programId, config) {
         const conn = this.getConnection();
         const pk = typeof programId === 'string' ? new PublicKey(programId) : programId;
-        return conn.getProgramAccounts(pk, config);
+        const result = await conn.getProgramAccounts(pk, config);
+        trackRpcCall('getProgramAccounts', 1);
+        return result;
     }
 
     // ============================================
@@ -128,7 +139,9 @@ class HeliusProvider {
         if (!response.ok) {
             throw new Error(`Helius Enhanced API error: ${response.status}`);
         }
-        return response.json();
+        const result = await response.json();
+        trackRpcCall('getEnhancedTransactions', 100);
+        return result;
     }
 
     /**
@@ -157,6 +170,7 @@ class HeliusProvider {
         if (data.error) {
             throw new Error(data.error.message);
         }
+        trackRpcCall('getTokenAccounts', 10);
         return data.result;
     }
 
@@ -177,6 +191,7 @@ class HeliusProvider {
         if (data.error) {
             throw new Error(data.error.message);
         }
+        trackRpcCall(method, getCreditCost(method));
         return data.result;
     }
 
@@ -188,6 +203,7 @@ class HeliusProvider {
             const start = Date.now();
             const conn = this.getConnection();
             await conn.getSlot();
+            trackRpcCall('getSlot', 1);
             return { healthy: true, latency: Date.now() - start };
         } catch (e) {
             return { healthy: false, error: e.message };

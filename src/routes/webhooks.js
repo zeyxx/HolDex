@@ -186,8 +186,10 @@ const isPoolAddress = (address) => {
 // ============================================
 // INPUT VALIDATION - Validate webhook payload BEFORE processing
 // ============================================
-const MAX_EVENTS_PER_BATCH = 100; // Prevent DoS via huge payloads
-const MAX_TRANSFERS_PER_EVENT = 50; // Reasonable limit per transaction
+const MAX_EVENTS_PER_BATCH = 50;    // Reduced from 100 - prevent DoS
+const MAX_TRANSFERS_PER_EVENT = 20; // Reduced from 50 - reasonable limit
+const MAX_TOTAL_TRANSFERS = 200;    // SECURITY: Hard cap on total transfers per batch
+                                    // Prevents 50×20=1000 → max 200 DB operations
 const MAX_TOKEN_AMOUNT = BigInt('18446744073709551615'); // Max uint64
 const MIN_TIMESTAMP = 1600000000; // Sept 2020 (before Solana mainnet)
 const MAX_TIMESTAMP = Math.floor(Date.now() / 1000) + 86400; // Now + 1 day buffer
@@ -350,6 +352,22 @@ function init(deps) {
                     error: 'Batch size exceeded',
                     max: MAX_EVENTS_PER_BATCH,
                     received: events.length
+                });
+            }
+
+            // ============================================
+            // SECURITY: Count total transfers BEFORE processing (anti-amplification)
+            // ============================================
+            let totalTransfers = 0;
+            for (const e of events) {
+                totalTransfers += (e.tokenTransfers?.length || 0);
+            }
+            if (totalTransfers > MAX_TOTAL_TRANSFERS) {
+                logger.warn(`[Webhook] Too many transfers: ${totalTransfers} (max ${MAX_TOTAL_TRANSFERS})`);
+                return res.status(400).json({
+                    error: 'Total transfers exceeded',
+                    max: MAX_TOTAL_TRANSFERS,
+                    received: totalTransfers
                 });
             }
 

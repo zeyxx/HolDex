@@ -466,6 +466,10 @@ async function startServer() {
         // Preload known mints to Redis cache (reduces DB load during webhook bursts)
         await preloadKnownMintsCache();
 
+        // Redis memory monitoring (log every 5 minutes, warn at 80%)
+        await logMemoryStatus(); // Log initial state
+        setInterval(() => logMemoryStatus(), 5 * 60 * 1000);
+
         // Start Token Queue Processor (rate-limited token indexing)
         const { startQueueProcessor } = require('./services/tokenQueue');
         startQueueProcessor();

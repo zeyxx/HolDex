@@ -120,9 +120,104 @@ function clampValue(value, min, max, fallback = 0) {
 }
 
 // ============================================
-// SOL PRICE (CoinGecko - free, reliable)
+// SOL PRICE - "onchain in truth"
 // ============================================
+// Priority: Pyth Oracle (on-chain) > CoinGecko (fallback)
 
+// Pyth SOL/USD Price Feed Account
+const PYTH_SOL_USD_FEED = 'H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG';
+// Pyth price account layout offsets
+const PYTH_PRICE_OFFSET = 208;     // aggregate.price (i64)
+const PYTH_EXPONENT_OFFSET = 20;   // exponent (i32)
+const PYTH_CONF_OFFSET = 216;      // aggregate.conf (u64)
+
+/**
+ * Get SOL/USD price from Pyth Oracle (on-chain)
+ * @returns {Object|null} Price data or null if unavailable
+ */
+async function getSolPricePyth() {
+    try {
+        const { PublicKey, Connection } = require('@solana/web3.js');
+
+        const heliusUrl = config.HELIUS_API_KEY
+            ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
+            : HELIUS_RPC_URL;
+        const connection = new Connection(heliusUrl, 'confirmed');
+
+        const accountInfo = await connection.getAccountInfo(
+            new PublicKey(PYTH_SOL_USD_FEED)
+        );
+
+        if (!accountInfo || !accountInfo.data || accountInfo.data.length < 240) {
+            return null;
+        }
+
+        const data = accountInfo.data;
+
+        // Read exponent (i32 at offset 20)
+        const exponent = data.readInt32LE(PYTH_EXPONENT_OFFSET);
+
+        // Read aggregate price (i64 at offset 208)
+        const priceRaw = data.readBigInt64LE(PYTH_PRICE_OFFSET);
+
+        // Read confidence interval (u64 at offset 216)
+        const confRaw = data.readBigUInt64LE(PYTH_CONF_OFFSET);
+
+        // Convert: price × 10^exponent
+        const price = Number(priceRaw) * Math.pow(10, exponent);
+        const confidence = Number(confRaw) * Math.pow(10, exponent);
+
+        if (price <= 0 || !Number.isFinite(price)) {
+            return null;
+        }
+
+        logger.debug(`[Pyth] SOL/USD: $${price.toFixed(2)} (±$${confidence.toFixed(4)})`);
+
+        return {
+            price,
+            confidence,
+            source: 'pyth_oracle',
+            onChain: true,
+            timestamp: Date.now()
+        };
+
+    } catch (e) {
+        logger.debug(`[Pyth] SOL price fetch error: ${e.message}`);
+        return null;
+    }
+}
+
+/**
+ * Get SOL/USD price from CoinGecko (fallback)
+ * @returns {number} SOL price in USD
+ */
+async function getSolPriceCoinGecko() {
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const response = await fetch(
+            'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+            { signal: controller.signal }
+        );
+        clearTimeout(timeout);
+
+        if (!response.ok) throw new Error(`CoinGecko: ${response.status}`);
+
+        const data = await response.json();
+        return data?.solana?.usd || 0;
+
+    } catch (e) {
+        logger.debug(`[CoinGecko] SOL price error: ${e.message}`);
+        return 0;
+    }
+}
+
+/**
+ * Get SOL/USD price with fallback chain
+ * Priority: Pyth Oracle (on-chain) > CoinGecko (API)
+ * Philosophy: "onchain in truth" - prefer on-chain sources
+ */
 async function getSolPrice() {
     const now = Date.now();
 
@@ -138,31 +233,36 @@ async function getSolPrice() {
 
     solPriceCache.lastAttempt = now;
 
-    try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-
-        const response = await fetch(
-            'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
-            { signal: controller.signal }
-        );
-        clearTimeout(timeout);
-
-        if (!response.ok) throw new Error(`CoinGecko: ${response.status}`);
-
-        const data = await response.json();
-        const price = data?.solana?.usd || 0;
-
-        if (price > 0) {
-            solPriceCache = { price, timestamp: now, lastAttempt: now };
-            logger.debug(`[PriceProvider] SOL: $${price}`);
-        }
-
-        return price || solPriceCache.price || 190;
-    } catch (e) {
-        logger.debug(`[PriceProvider] SOL price error: ${e.message}`);
-        return solPriceCache.price || 190;
+    // 1. PRIMARY: Try Pyth Oracle (on-chain)
+    const pythResult = await getSolPricePyth();
+    if (pythResult && pythResult.price > 0) {
+        solPriceCache = {
+            price: pythResult.price,
+            timestamp: now,
+            lastAttempt: now,
+            source: 'pyth_oracle'
+        };
+        return pythResult.price;
     }
+
+    // 2. FALLBACK: CoinGecko (off-chain)
+    logger.debug('[PriceProvider] Pyth unavailable, falling back to CoinGecko');
+    const geckoPrice = await getSolPriceCoinGecko();
+
+    if (geckoPrice > 0) {
+        solPriceCache = {
+            price: geckoPrice,
+            timestamp: now,
+            lastAttempt: now,
+            source: 'coingecko'
+        };
+        logger.debug(`[PriceProvider] SOL: $${geckoPrice} (CoinGecko fallback)`);
+        return geckoPrice;
+    }
+
+    // 3. EMERGENCY: Return cached or default
+    logger.warn('[PriceProvider] All SOL price sources failed, using cached/default');
+    return solPriceCache.price || 190;
 }
 
 // ============================================
@@ -1025,6 +1125,11 @@ module.exports = {
     // Program IDs (for external reference)
     PUMPFUN_PROGRAM_ID,
     PUMPSWAP_AMM_PROGRAM_ID,
+    PYTH_SOL_USD_FEED,
+
+    // Oracle functions
+    getSolPricePyth,
+    getSolPriceCoinGecko,
 
     // Utilities
     clampValue,

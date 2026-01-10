@@ -1587,6 +1587,63 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/fix-nodes-table
+     * Add missing columns to nodes table (one-time fix)
+     */
+    router.post('/admin/fix-nodes-table', requireAdmin, async (req, res) => {
+        const fixed = [];
+        const errors = [];
+
+        const alterStatements = [
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT \'pending\'',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS is_genesis BOOLEAN DEFAULT FALSE',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS participant_wallet TEXT',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS required_approvals INTEGER DEFAULT 2',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS current_approvals INTEGER DEFAULT 0',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS approval_expires_at BIGINT',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS approved_at BIGINT',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS capabilities JSONB DEFAULT \'["polling", "verification"]\'::jsonb',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS work_verifications INTEGER DEFAULT 0',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS work_consensus_participated INTEGER DEFAULT 0',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS work_uptime_hours DECIMAL(10,2) DEFAULT 0',
+            'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS work_score DECIMAL(10,2) DEFAULT 0'
+        ];
+
+        for (const sql of alterStatements) {
+            try {
+                await db.run(sql);
+                const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1];
+                fixed.push(col || 'unknown');
+            } catch (e) {
+                errors.push({ sql: sql.slice(0, 60), error: e.message });
+            }
+        }
+
+        // Now create the missing indexes
+        const indexes = [
+            'CREATE INDEX IF NOT EXISTS idx_nodes_approval ON nodes(approval_status)',
+            'CREATE INDEX IF NOT EXISTS idx_nodes_genesis ON nodes(is_genesis)',
+            'CREATE INDEX IF NOT EXISTS idx_nodes_wallet ON nodes(participant_wallet)'
+        ];
+
+        for (const sql of indexes) {
+            try {
+                await db.run(sql);
+                fixed.push(sql.match(/idx_\w+/)?.[0] || 'index');
+            } catch (e) {
+                errors.push({ sql: sql.slice(0, 60), error: e.message });
+            }
+        }
+
+        res.json({
+            success: errors.length === 0,
+            message: `Fixed ${fixed.length} columns/indexes`,
+            fixed,
+            errors
+        });
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

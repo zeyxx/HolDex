@@ -39,11 +39,13 @@ Fonctions cachées:
   - fetchPumpFunOnChainPrices() - rate limit par batch
 ```
 
-### P7: Audit getEnhancedTransactions
+### ✅ P7: Audit getEnhancedTransactions (DONE)
 ```
-Action: grep -r "getEnhancedTransactions" src/
-Vérifier: Chaque appel nécessaire? Cache possible?
-Coût: 1 crédit par call (très cher pour listes)
+Résultat: 4 appels dans kScoreUpdater.js
+  - Tous passent par rateLimitedFetch() ✓
+  - Déjà couverts par P4 (global rate limit) ✓
+  - Caching via P1-P3 (retention cache 24h) ✓
+Status: No additional action needed
 ```
 
 ---

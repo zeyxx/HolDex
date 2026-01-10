@@ -14,7 +14,7 @@ const logger = require('./services/logger');
 const { logHardcapConfig } = require('./services/rpcHardcap');
 const { initDB, getDB, preloadKnownMintsCache } = require('./services/database');
 const { connectRedis } = require('./services/redis');
-const { startSnapshotter } = require('./indexer/tasks/snapshotter');
+// MOVED TO CALCULATOR: const { startSnapshotter } = require('./indexer/tasks/snapshotter');
 const _kScoreUpdater = require('./tasks/kScoreUpdater');
 const _integrityWatchdog = require('./tasks/integrityWatchdog');
 const { startPriceWorker } = require('./tasks/priceWorker');
@@ -497,7 +497,7 @@ async function startServer() {
         }
 
         // Start Background Tasks
-        startSnapshotter();
+        // MOVED TO CALCULATOR: startSnapshotter() - reduces API RPC load
 
         // PriceWorker: Unified price service (Jupiter + Raydium, 0 Helius credits)
         startPriceWorker({ db: getDB(), broadcast: null });

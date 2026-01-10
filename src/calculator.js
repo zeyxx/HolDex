@@ -292,6 +292,12 @@ async function main() {
         // growerScanner.start(deps);
         logger.info('⏸️ Grower Scanner DISABLED (tokens only added via CA search)');
 
+        // Pool Snapshotter - moved from API to reduce API RPC load
+        // Uses direct connection for getMultipleAccountsInfo (pool reserve tracking)
+        const { startSnapshotter } = require('./indexer/tasks/snapshotter');
+        startSnapshotter();
+        logger.info('📸 Pool Snapshotter ACTIVE (moved from API)');
+
         // Start heartbeat
         setInterval(logHeartbeat, 60000); // Every minute
         logHeartbeat(); // First one immediately

@@ -14,8 +14,8 @@
  */
 
 const { logger } = require('../services');
-const { signMarket, signFull } = require('../utils/dataSignature');
 const priceProvider = require('../services/priceProvider');
+// Note: sig_market updates deferred to K-Score updater to reduce DB calls
 
 // Refresh tiers (in milliseconds)
 const TIERS = {
@@ -100,98 +100,128 @@ async function runPriceUpdateCycle(db, broadcast) {
 
         logger.info(`[PriceWorker] Updating ${allToUpdate.length} tokens in ${batches.length} batches`);
 
+        // Collect all price data from API batches first (no DB calls yet)
+        const allPriceData = new Map();
+
         for (const batch of batches) {
             // Use new price provider instead of DexScreener
             const prices = await priceProvider.fetchBatchPrices(batch);
 
-            // Update database
             for (const [mint, priceData] of prices) {
-                try {
-                    // Only update fields that have valid data (not null and greater than 0)
-                    // This preserves existing good data when API fetch fails or returns null/0
-                    // Uses COALESCE to preserve existing values when new value is null
-                    const result = await db.get(`
-                        UPDATE tokens SET
-                            priceusd = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN $1 ELSE priceusd END,
-                            marketcap = CASE WHEN $2::numeric IS NOT NULL AND $2::numeric > 0 THEN $2 ELSE marketcap END,
-                            liquidity = CASE WHEN $3::numeric IS NOT NULL AND $3::numeric > 0 THEN $3 ELSE liquidity END,
-                            volume24h = CASE WHEN $4::numeric IS NOT NULL AND $4::numeric > 0 THEN $4 ELSE volume24h END,
-                            change24h = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN COALESCE($5, change24h) ELSE change24h END,
-                            change1h = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN COALESCE($6, change1h) ELSE change1h END,
-                            change5m = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN COALESCE($7, change5m) ELSE change5m END,
-                            price_source = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN $8 ELSE price_source END,
-                            price_timestamp = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN $9 ELSE price_timestamp END,
-                            price_pool = CASE WHEN $1::numeric IS NOT NULL AND $1::numeric > 0 THEN COALESCE($10, price_pool) ELSE price_pool END,
-                            liquidity_source = CASE WHEN $3::numeric IS NOT NULL AND $3::numeric > 0 THEN $8 ELSE liquidity_source END,
-                            liquidity_timestamp = CASE WHEN $3::numeric IS NOT NULL AND $3::numeric > 0 THEN $9 ELSE liquidity_timestamp END
-                        WHERE mint = $11
-                        RETURNING mint, priceusd, marketcap, liquidity,
-                                  price_source, price_timestamp, price_pool,
-                                  liquidity_source, liquidity_timestamp,
-                                  mcap_calculated, holders_source, holders_timestamp, age_days
-                    `, [
-                        priceData.priceUsd,
-                        priceData.mcap,
-                        priceData.liquidity,
-                        priceData.volume24h,
-                        priceData.change24h,
-                        priceData.change1h,
-                        priceData.change5m,
-                        priceData.source, // 'jupiter' or 'raydium'
-                        priceData.timestamp.toString(),
-                        priceData.pairAddress,
-                        mint
-                    ]);
+                allPriceData.set(mint, priceData);
+            }
 
-                    // Re-sign market data AND sig_full to maintain integrity
-                    if (result) {
-                        const sig_market = signMarket(result);
+            // Delay between API batches to respect rate limits
+            if (batches.length > 1) {
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
 
-                        // Fetch all signatures to recompute sig_full
-                        const sigs = await db.get(`
-                            SELECT sig_identity, sig_security, sig_lp, sig_supply,
-                                   sig_kscore, sig_origin, chaos_nonce
-                            FROM tokens WHERE mint = $1
-                        `, [mint]);
+        // BATCH DB UPDATE: Single query for all prices using unnest()
+        // This reduces ~90 DB calls per batch to just 1
+        if (allPriceData.size > 0) {
+            const mints = [];
+            const prices = [];
+            const mcaps = [];
+            const liquidities = [];
+            const volumes = [];
+            const changes24h = [];
+            const changes1h = [];
+            const changes5m = [];
+            const sources = [];
+            const timestamps = [];
+            const pools = [];
 
-                        if (sigs && sigs.chaos_nonce) {
-                            const sig_full = signFull({
-                                sig_identity: sigs.sig_identity,
-                                sig_security: sigs.sig_security,
-                                sig_lp: sigs.sig_lp,
-                                sig_supply: sigs.sig_supply,
-                                sig_kscore: sigs.sig_kscore,
-                                sig_market: sig_market,
-                                sig_origin: sigs.sig_origin
-                            }, sigs.chaos_nonce);
+            for (const [mint, pd] of allPriceData) {
+                mints.push(mint);
+                prices.push(pd.priceUsd || null);
+                mcaps.push(pd.mcap || null);
+                liquidities.push(pd.liquidity || null);
+                volumes.push(pd.volume24h || null);
+                changes24h.push(pd.change24h || null);
+                changes1h.push(pd.change1h || null);
+                changes5m.push(pd.change5m || null);
+                sources.push(pd.source || 'jupiter');
+                timestamps.push(pd.timestamp ? pd.timestamp.toString() : Date.now().toString());
+                pools.push(pd.pairAddress || null);
+            }
 
-                            await db.run(
-                                `UPDATE tokens SET sig_market = $1, sig_full = $2 WHERE mint = $3`,
-                                [sig_market, sig_full, mint]
-                            );
-                        } else {
-                            // Fallback: just update sig_market
-                            await db.run(
-                                `UPDATE tokens SET sig_market = $1 WHERE mint = $2`,
-                                [sig_market, mint]
-                            );
-                        }
+            try {
+                // Single batch UPDATE using unnest arrays
+                const result = await db.run(`
+                    UPDATE tokens AS t SET
+                        priceusd = CASE WHEN v.price::numeric > 0 THEN v.price ELSE t.priceusd END,
+                        marketcap = CASE WHEN v.mcap::numeric > 0 THEN v.mcap ELSE t.marketcap END,
+                        liquidity = CASE WHEN v.liq::numeric > 0 THEN v.liq ELSE t.liquidity END,
+                        volume24h = CASE WHEN v.vol::numeric > 0 THEN v.vol ELSE t.volume24h END,
+                        change24h = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.c24h, t.change24h) ELSE t.change24h END,
+                        change1h = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.c1h, t.change1h) ELSE t.change1h END,
+                        change5m = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.c5m, t.change5m) ELSE t.change5m END,
+                        price_source = CASE WHEN v.price::numeric > 0 THEN v.src ELSE t.price_source END,
+                        price_timestamp = CASE WHEN v.price::numeric > 0 THEN v.ts ELSE t.price_timestamp END,
+                        price_pool = CASE WHEN v.price::numeric > 0 THEN COALESCE(v.pool, t.price_pool) ELSE t.price_pool END,
+                        liquidity_source = CASE WHEN v.liq::numeric > 0 THEN v.src ELSE t.liquidity_source END,
+                        liquidity_timestamp = CASE WHEN v.liq::numeric > 0 THEN v.ts ELSE t.liquidity_timestamp END,
+                        sig_market = NULL
+                    FROM (
+                        SELECT
+                            unnest($1::text[]) as mint,
+                            unnest($2::numeric[]) as price,
+                            unnest($3::numeric[]) as mcap,
+                            unnest($4::numeric[]) as liq,
+                            unnest($5::numeric[]) as vol,
+                            unnest($6::numeric[]) as c24h,
+                            unnest($7::numeric[]) as c1h,
+                            unnest($8::numeric[]) as c5m,
+                            unnest($9::text[]) as src,
+                            unnest($10::text[]) as ts,
+                            unnest($11::text[]) as pool
+                    ) AS v
+                    WHERE t.mint = v.mint
+                `, [mints, prices, mcaps, liquidities, volumes, changes24h, changes1h, changes5m, sources, timestamps, pools]);
+
+                totalUpdated = allPriceData.size;
+
+                // Note: sig_market set to NULL will be recomputed by K-Score updater
+                // This avoids 2 extra DB calls per token (SELECT sigs + UPDATE sigs)
+                // K-Score updater already re-signs all tokens periodically
+
+            } catch (e) {
+                logger.error('[PriceWorker] Batch DB update failed:', e.message);
+                // Fallback: try individual updates (slower but more resilient)
+                for (const [mint, priceData] of allPriceData) {
+                    try {
+                        await db.run(`
+                            UPDATE tokens SET
+                                priceusd = CASE WHEN $1::numeric > 0 THEN $1 ELSE priceusd END,
+                                marketcap = CASE WHEN $2::numeric > 0 THEN $2 ELSE marketcap END,
+                                liquidity = CASE WHEN $3::numeric > 0 THEN $3 ELSE liquidity END,
+                                volume24h = CASE WHEN $4::numeric > 0 THEN $4 ELSE volume24h END,
+                                price_source = CASE WHEN $1::numeric > 0 THEN $5 ELSE price_source END,
+                                price_timestamp = CASE WHEN $1::numeric > 0 THEN $6 ELSE price_timestamp END,
+                                sig_market = NULL
+                            WHERE mint = $7
+                        `, [
+                            priceData.priceUsd,
+                            priceData.mcap,
+                            priceData.liquidity,
+                            priceData.volume24h,
+                            priceData.source,
+                            priceData.timestamp?.toString(),
+                            mint
+                        ]);
+                        totalUpdated++;
+                    } catch (e2) {
+                        logger.error(`[PriceWorker] Individual update failed for ${mint}:`, e2.message);
                     }
-
-                    totalUpdated++;
-
-                    // Broadcast price update via WebSocket
-                    if (broadcast) {
-                        broadcast.priceUpdate(mint, priceData);
-                    }
-                } catch (e) {
-                    logger.error(`[PriceWorker] DB update failed for ${mint}:`, e.message);
                 }
             }
 
-            // Delay between batches to respect rate limits
-            if (batches.length > 1) {
-                await new Promise(r => setTimeout(r, 500));
+            // Broadcast price updates via WebSocket
+            if (broadcast) {
+                for (const [mint, priceData] of allPriceData) {
+                    broadcast.priceUpdate(mint, priceData);
+                }
             }
         }
 

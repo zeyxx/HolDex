@@ -69,6 +69,7 @@ const { addTokenToMasterWebhook } = require('../services/heliusWebhook');
 const verification = require('../services/verificationService');
 const dataVerification = require('../services/dataVerification');
 const nodeService = require('../services/nodeService');
+const backupService = require('../services/backup');
 
 // Lazy load canvas-based card generator (avoid build failures on workers without native deps)
 let cardGeneratorModule = null;
@@ -1026,106 +1027,224 @@ function init(deps) {
         } catch (e) { res.status(500).json({ success: false, error: sanitizeError(e) }); }
     });
 
-    router.get('/admin/backup/updates', requireAdmin, async (req, res) => {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // BACKUP/RESTORE SYSTEM v2.0 - Comprehensive Database Backup
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * GET /admin/backup
+     * Full database backup with all tables
+     * Query params:
+     *   - tables: comma-separated list of tables (optional, defaults to all)
+     *   - mints: comma-separated list of mints for selective backup (optional)
+     */
+    router.get('/admin/backup', requireAdmin, async (req, res) => {
         try {
-            const updates = await db.all('SELECT * FROM token_updates ORDER BY submittedAt DESC');
-            // SECURITY: Never expose key_hash in backup - only metadata
-            const keys = await db.all(`
-                SELECT key_prefix, owner, wallet, tier, requests_limit, requests_today,
-                       last_reset, is_active, created_at
-                FROM api_keys
-            `);
+            const { tables, mints } = req.query;
+
+            let backup;
+            if (mints) {
+                // Selective backup by mint addresses
+                const mintList = mints.split(',').map(m => m.trim()).filter(Boolean);
+                backup = await backupService.createSelectiveBackup(db, {
+                    mints: mintList,
+                    tables: tables ? tables.split(',').map(t => t.trim()) : undefined,
+                });
+            } else {
+                // Full backup (optionally filtered by tables)
+                backup = await backupService.createBackup(db, {
+                    tables: tables ? tables.split(',').map(t => t.trim()) : undefined,
+                });
+            }
+
             res.setHeader('Content-Type', 'application/json');
-            res.setHeader('Content-Disposition', `attachment; filename=holdex_backup_${Date.now()}.json`);
+            res.setHeader('Content-Disposition', `attachment; filename=holdex_backup_v${backup.version}_${Date.now()}.json`);
+            res.json(backup);
+
+        } catch (e) {
+            logger.error(`Backup failed: ${e.message}`);
+            res.status(500).json({ success: false, error: sanitizeError(e) });
+        }
+    });
+
+    /**
+     * GET /admin/backup/estimate
+     * Get row counts for backup size estimation
+     */
+    router.get('/admin/backup/estimate', requireAdmin, async (req, res) => {
+        try {
+            const estimate = await backupService.getBackupSizeEstimate(db);
             res.json({
                 success: true,
-                timestamp: Date.now(),
-                updates: updates,
-                api_keys_metadata: keys,
-                warning: 'API key hashes excluded for security. Keys must be regenerated after restore.'
+                version: backupService.BACKUP_VERSION,
+                tables: estimate,
+                total_rows: estimate.total,
             });
         } catch (e) {
             res.status(500).json({ success: false, error: sanitizeError(e) });
         }
     });
-    
-    router.post('/admin/restore/updates', requireAdmin, async (req, res) => { 
-        const { updates, api_keys } = req.body; 
-        
-        if (!Array.isArray(updates) && !Array.isArray(api_keys)) {
-             return res.status(400).json({ success: false, error: "Invalid data format." }); 
-        }
-        
-        const results = {
-            updates: { restored: 0, skipped: 0, merged: 0 },
-            keys: { restored: 0, skipped: 0, merged: 0 }
-        };
 
-        const affectedMints = new Set();
-
+    /**
+     * POST /admin/restore
+     * Full database restore with transaction safety
+     * Body: backup JSON object
+     * Query params:
+     *   - merge: true (default) to merge with existing data, false to skip existing
+     *   - dryRun: true to preview without committing
+     *   - skipTables: comma-separated list of tables to skip
+     *   - continueOnError: true to continue even if some tables fail
+     */
+    router.post('/admin/restore', requireAdmin, async (req, res) => {
         try {
+            const backup = req.body;
+            const {
+                merge = 'true',
+                dryRun = 'false',
+                skipTables = '',
+                continueOnError = 'false',
+            } = req.query;
+
+            if (!backup || !backup.tables) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid backup format. Expected { version, tables: {...} }',
+                });
+            }
+
+            logger.info(`💾 Restore initiated - Version: ${backup.version}, Dry run: ${dryRun}`);
+
+            const results = await backupService.restoreBackup(db, backup, {
+                merge: merge === 'true',
+                dryRun: dryRun === 'true',
+                skipTables: skipTables ? skipTables.split(',').map(t => t.trim()) : [],
+                continueOnError: continueOnError === 'true',
+            });
+
+            // Trigger K-Score recalculation for restored tokens (in background)
+            if (results.success && !results.dryRun && results.tables.tokens?.restored > 0) {
+                const tokenMints = backup.tables.tokens?.map(t => t.mint).filter(Boolean) || [];
+                if (tokenMints.length > 0 && tokenMints.length <= 100) {
+                    // Only auto-recalculate if reasonable number of tokens
+                    logger.info(`💾 Queuing ${tokenMints.length} tokens for K-Score recalculation`);
+                    setImmediate(async () => {
+                        for (const mint of tokenMints.slice(0, 50)) {
+                            try {
+                                await updateSingleToken({ db }, mint);
+                            } catch (err) {
+                                logger.warn(`K-Score recalc failed for ${mint}: ${err.message}`);
+                            }
+                        }
+                    });
+                }
+            }
+
+            res.json({
+                success: results.success,
+                dryRun: dryRun === 'true',
+                results: results.tables,
+                summary: results.summary,
+                errors: results.errors,
+                message: results.success
+                    ? `Restore ${dryRun === 'true' ? 'preview' : 'complete'}: ${results.summary.restored} added, ${results.summary.merged} merged, ${results.summary.skipped} skipped`
+                    : `Restore failed with ${results.errors.length} errors - changes rolled back`,
+            });
+
+        } catch (e) {
+            logger.error(`Restore failed: ${e.message}`);
+            res.status(500).json({ success: false, error: sanitizeError(e) });
+        }
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // LEGACY ENDPOINTS - Backwards compatibility (redirect to new system)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * GET /admin/backup/updates (LEGACY)
+     * Old endpoint - now redirects to selective backup of token_updates only
+     */
+    router.get('/admin/backup/updates', requireAdmin, async (req, res) => {
+        try {
+            const backup = await backupService.createBackup(db, {
+                tables: ['token_updates', 'api_keys'],
+            });
+
+            // Transform to legacy format for backwards compatibility
+            res.setHeader('Content-Type', 'application/json');
+            res.setHeader('Content-Disposition', `attachment; filename=holdex_backup_${Date.now()}.json`);
+            res.json({
+                success: true,
+                timestamp: backup.timestamp,
+                updates: backup.tables.token_updates || [],
+                api_keys_metadata: backup.tables.api_keys || [],
+                warning: 'API key hashes excluded for security. Keys must be regenerated after restore.',
+                _note: 'This is a legacy endpoint. Use GET /admin/backup for full backups.',
+            });
+        } catch (e) {
+            res.status(500).json({ success: false, error: sanitizeError(e) });
+        }
+    });
+
+    /**
+     * POST /admin/restore/updates (LEGACY)
+     * Old endpoint - converts legacy format and uses new restore system
+     */
+    router.post('/admin/restore/updates', requireAdmin, async (req, res) => {
+        try {
+            const { updates, api_keys } = req.body;
+
+            if (!Array.isArray(updates) && !Array.isArray(api_keys)) {
+                return res.status(400).json({ success: false, error: "Invalid data format." });
+            }
+
+            // Convert legacy format to new backup format
+            const legacyBackup = {
+                version: backupService.BACKUP_VERSION,
+                timestamp: Date.now(),
+                tables: {
+                    token_updates: updates || [],
+                    // Note: api_keys can't be restored without hashes
+                },
+            };
+
+            // Auto-index missing tokens before restore
+            const affectedMints = new Set();
             if (Array.isArray(updates)) {
                 for (const u of updates) {
-                    try {
-                        if (u.mint) {
-                            const tokenExists = await db.get('SELECT mint FROM tokens WHERE mint = $1', [u.mint]);
-                            if (!tokenExists) {
-                                try {
-                                    await indexTokenOnChain(u.mint);
-                                } catch (idxErr) {
-                                    console.error(`Auto-index failed for restored token ${u.mint}: ${idxErr.message}`);
-                                }
-                            }
-                        }
-
-                        const sig = u.signature || u.txId || 'manual_' + Date.now();
-                        const existing = await db.get('SELECT * FROM token_updates WHERE signature = $1', [sig]);
-                        
-                        if (existing) {
-                            const fields = ['twitter', 'website', 'telegram', 'banner', 'description', 'payer', 'status'];
-                            const sets = [];
-                            const vals = [];
-                            let idx = 1;
-
-                            for(const f of fields) {
-                                if ((existing[f] === null || existing[f] === '') && (u[f] !== null && u[f] !== undefined && u[f] !== '')) {
-                                    sets.push(`${f} = $${idx++}`);
-                                    vals.push(u[f]);
-                                }
-                            }
-
-                            if (sets.length > 0) {
-                                vals.push(existing.id);
-                                await db.run(`UPDATE token_updates SET ${sets.join(', ')} WHERE id = $${idx}`, vals);
-                                results.updates.merged++;
+                    if (u.mint) {
+                        const tokenExists = await db.get('SELECT mint FROM tokens WHERE mint = $1', [u.mint]);
+                        if (!tokenExists) {
+                            try {
+                                await indexTokenOnChain(u.mint);
                                 affectedMints.add(u.mint);
-                            } else {
-                                results.updates.skipped++;
+                            } catch (idxErr) {
+                                logger.warn(`Auto-index failed for ${u.mint}: ${idxErr.message}`);
                             }
-                        } else {
-                            const timestamp = u.submittedAt || u.submittedat || Date.now();
-                            const status = u.status || 'pending';
-                            await db.run(`
-                                INSERT INTO token_updates (mint, twitter, website, telegram, banner, description, status, signature, payer, submittedAt)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                            `, [u.mint, u.twitter, u.website, u.telegram, u.banner, u.description, status, sig, u.payer || 'unknown', timestamp]);
-                            results.updates.restored++;
-                            affectedMints.add(u.mint);
                         }
+                    }
+                }
+            }
 
-                        const status = u.status || (existing ? existing.status : 'pending');
-                        
-                        if (status === 'approved') {
+            const results = await backupService.restoreBackup(db, legacyBackup, {
+                merge: true,
+                continueOnError: true,
+            });
+
+            // Sync approved updates to token metadata
+            if (Array.isArray(updates)) {
+                for (const u of updates) {
+                    if (u.status === 'approved' && u.mint) {
+                        try {
                             const token = await db.get('SELECT metadata, hasCommunityUpdate FROM tokens WHERE mint = $1', [u.mint]);
                             if (token) {
                                 let meta = {};
-                                try { meta = typeof token.metadata === 'string' ? JSON.parse(token.metadata) : token.metadata || {}; } catch(_e) { /* ignore */ }
-                                
+                                try { meta = typeof token.metadata === 'string' ? JSON.parse(token.metadata) : token.metadata || {}; } catch (_e) { /* ignore */ }
+
                                 meta.community = meta.community || {};
                                 let changed = false;
-                                
+
                                 const syncFields = ['twitter', 'website', 'telegram', 'banner', 'description'];
-                                
                                 for (const f of syncFields) {
                                     if ((!meta.community[f] || meta.community[f] === "") && (u[f] && u[f] !== "")) {
                                         meta.community[f] = u[f];
@@ -1135,72 +1254,42 @@ function init(deps) {
 
                                 if (changed || !token.hasCommunityUpdate) {
                                     await db.run(`
-                                        UPDATE tokens 
-                                        SET metadata = $1, hasCommunityUpdate = TRUE, updated_at = CURRENT_TIMESTAMP 
+                                        UPDATE tokens
+                                        SET metadata = $1, hasCommunityUpdate = TRUE, updated_at = CURRENT_TIMESTAMP
                                         WHERE mint = $2
                                     `, [JSON.stringify(meta), u.mint]);
                                     affectedMints.add(u.mint);
                                 }
                             }
+                        } catch (e) {
+                            logger.warn(`Metadata sync failed for ${u.mint}: ${e.message}`);
                         }
-
-                    } catch (e) { console.error(`Update Restore Error: ${e.message}`); }
-                }
-            }
-
-            if (Array.isArray(api_keys)) {
-                for (const k of api_keys) {
-                    try {
-                        const existing = await db.get('SELECT * FROM api_keys WHERE key = $1', [k.key]);
-                        if (existing) {
-                            const fields = ['owner', 'tier', 'requests_limit']; 
-                            const sets = [];
-                            const vals = [];
-                            let idx = 1;
-
-                            for(const f of fields) {
-                                const inputVal = k[f] || k[f.replace(/_([a-z])/g, g => g[1].toUpperCase())];
-                                if ((existing[f] === null || existing[f] === '') && (inputVal !== undefined && inputVal !== null)) {
-                                    sets.push(`${f} = $${idx++}`);
-                                    vals.push(inputVal);
-                                }
-                            }
-                            
-                            if (sets.length > 0) {
-                                vals.push(existing.key);
-                                await db.run(`UPDATE api_keys SET ${sets.join(', ')} WHERE key = $${idx}`, vals);
-                                results.keys.merged++;
-                            } else {
-                                results.keys.skipped++;
-                            }
-                            continue;
-                        }
-                        
-                        const createdAt = k.created_at || k.createdAt || Date.now();
-                        const limit = k.requests_limit || k.requestsLimit || 1000;
-                        const active = (k.is_active !== undefined) ? k.is_active : true;
-
-                        await db.run(`
-                            INSERT INTO api_keys (key, owner, tier, requests_limit, is_active, created_at)
-                            VALUES ($1, $2, $3, $4, $5, $6)
-                        `, [k.key, k.owner || 'Restored User', k.tier || 'free', limit, active, createdAt]);
-                        
-                        results.keys.restored++;
-                    } catch (e) { console.error(`Key Restore Error: ${e.message}`); }
-                }
-            }
-
-            if (affectedMints.size > 0) {
-                (async () => {
-                    for (const mint of affectedMints) {
-                        await updateSingleToken({ db }, mint);
                     }
-                })();
+                }
             }
 
-            res.json({ success: true, results, message: `Update Log: ${results.updates.restored} added, ${results.updates.merged} merged. Keys: ${results.keys.restored} added, ${results.keys.merged} merged.` });
+            // Trigger K-Score recalculation for affected tokens
+            if (affectedMints.size > 0) {
+                setImmediate(async () => {
+                    for (const mint of affectedMints) {
+                        try { await updateSingleToken({ db }, mint); } catch (_e) { /* ignore */ }
+                    }
+                });
+            }
+
+            const updateResult = results.tables.token_updates || { restored: 0, merged: 0, skipped: 0 };
+            res.json({
+                success: results.success,
+                results: {
+                    updates: updateResult,
+                    keys: { restored: 0, skipped: api_keys?.length || 0, merged: 0, note: 'API keys require hashes - cannot restore from metadata only' },
+                },
+                message: `Update Log: ${updateResult.restored} added, ${updateResult.merged} merged.`,
+                _note: 'This is a legacy endpoint. Use POST /admin/restore for full restores.',
+            });
 
         } catch (e) {
+            logger.error(`Legacy restore failed: ${e.message}`);
             res.status(500).json({ success: false, error: sanitizeError(e) });
         }
     });

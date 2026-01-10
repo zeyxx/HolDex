@@ -990,7 +990,30 @@ async function batchCheckPools(addresses) {
 const MAX_HOLDERS_PER_TOKEN = 10000; // 10k holders max
 const MAX_HOLDER_PAGES = 10; // Max 10 pages of 1000 = 10k
 
+// ============================================
+// HOLDER LIST CACHE: 1h TTL (holders change more frequently)
+// SAVES: Up to 10 RPC calls per token (getTokenAccounts pagination)
+// ============================================
+const HOLDERS_LIST_CACHE_TTL = 60 * 60; // 1 hour in seconds
+const HOLDERS_LIST_CACHE_PREFIX = 'holders_list:';
+
 async function fetchTokenHolders(mint) {
+    const redis = getRedisClient();
+    const cacheKey = `${HOLDERS_LIST_CACHE_PREFIX}${mint}`;
+
+    // 1. Try Redis cache first (1h TTL)
+    if (redis) {
+        try {
+            const cached = await redis.get(cacheKey);
+            if (cached) {
+                const holders = JSON.parse(cached);
+                logger.info(`[Holders] ${mint.slice(0,8)}: Cache HIT (${holders.length} holders) - 0 RPC`);
+                return holders;
+            }
+        } catch (_e) { /* Cache miss, continue to RPC */ }
+    }
+
+    // 2. Cache miss - fetch from Helius (EXPENSIVE: up to 10 RPC calls)
     const holders = [];
     let cursor = null;
     let pageCount = 0;
@@ -1023,14 +1046,50 @@ async function fetchTokenHolders(mint) {
 
     // BigInt-safe comparison (sort() expects Number, not BigInt)
     holders.sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
+
+    // 3. Cache the result (fire-and-forget, 1h TTL)
+    if (redis && holders.length > 0) {
+        // Only cache top 100 holders to save Redis memory (conviction only needs top 50)
+        const holdersToCache = holders.slice(0, 100);
+        redis.set(cacheKey, JSON.stringify(holdersToCache), 'EX', HOLDERS_LIST_CACHE_TTL).catch(() => {});
+        logger.info(`[Holders] ${mint.slice(0,8)}: Cached ${holdersToCache.length}/${holders.length} holders (TTL: 1h)`);
+    }
+
     return holders;
 }
+
+// ============================================
+// HOLDER RETENTION CACHE: Aggressive 24h caching
+// Philosophy: Holder behavior rarely changes drastically in 24h
+// SAVES: 6 RPC calls per holder (1 oldest + up to 5 recent pages)
+// ============================================
+const RETENTION_CACHE_TTL = 24 * 60 * 60; // 24 hours in seconds
+const RETENTION_CACHE_PREFIX = 'retention:';
 
 /**
  * Analyze holder's retention and trading behavior
  * Optimized with Helius sort-order for efficient first transaction lookup
+ *
+ * RPC CREDIT OPTIMIZATION: 24h Redis cache (saves ~120 RPC calls per token)
+ * Cache key: retention:{mint}:{wallet}
  */
 async function getHolderRetention(wallet, mint) {
+    const redis = getRedisClient();
+    const cacheKey = `${RETENTION_CACHE_PREFIX}${mint}:${wallet}`;
+
+    // 1. Try Redis cache first (24h TTL)
+    if (redis) {
+        try {
+            const cached = await redis.get(cacheKey);
+            if (cached) {
+                const data = JSON.parse(cached);
+                logger.debug(`[Retention] Cache HIT for ${wallet.slice(0, 8)}... on ${mint.slice(0, 8)}...`);
+                return data;
+            }
+        } catch (_e) { /* Cache miss, continue to RPC */ }
+    }
+
+    // 2. Cache miss - fetch from Helius (EXPENSIVE: up to 6 RPC calls)
     let firstBuyAmount = 0;
     let currentBalance = 0;
     let before = null;
@@ -1101,7 +1160,7 @@ async function getHolderRetention(wallet, mint) {
     if (currentBalance < 0) currentBalance = 0;
     const retention = firstBuyAmount > 0 ? currentBalance / firstBuyAmount : 0;
 
-    return {
+    const result = {
         retention,
         buyCount,
         sellCount,
@@ -1109,6 +1168,14 @@ async function getHolderRetention(wallet, mint) {
         lastSignature,
         lastTxTimestamp  // K-Score v9: For Activity freshness
     };
+
+    // 3. Cache the result (fire-and-forget, 24h TTL)
+    if (redis) {
+        redis.set(cacheKey, JSON.stringify(result), 'EX', RETENTION_CACHE_TTL).catch(() => {});
+        logger.debug(`[Retention] Cached ${wallet.slice(0, 8)}... on ${mint.slice(0, 8)}... (TTL: 24h)`);
+    }
+
+    return result;
 }
 
 function classifyRetention(retentionData) {
@@ -1135,6 +1202,7 @@ function classifyRetention(retentionData) {
 async function calculateConvictionAndHolders(mint, priceUsd = 0, _decimals = 9, db = null) {
     const TOP_HOLDERS = 20;
     const CANDIDATES = 50;
+    const CONVICTION_ANALYSIS_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
     // K-Score v10: No threshold - count ALL holders
     // Philosophy $asdfasdfa: Simple, on-chain pure, no arbitrary thresholds
@@ -1142,6 +1210,48 @@ async function calculateConvictionAndHolders(mint, priceUsd = 0, _decimals = 9, 
     // Dust (1-5000 tokens) is negligible in % terms at any supply level
 
     try {
+        // ============================================
+        // RPC CREDIT PROTECTION: Skip if analyzed within 24h
+        // ============================================
+        // This is the FIRST check - before any RPC calls
+        // Saves ~130 RPC calls per token per day
+        // Only bypass if forceDeepRefreshMode is explicitly set
+
+        if (db && !forceDeepRefreshMode) {
+            const lastAnalysis = await db.get(
+                `SELECT holders_snapshot_check, conviction_score, holders, real_holders, total_holders,
+                        conviction_accumulators, conviction_holders, conviction_reducers, conviction_extractors,
+                        conviction_analyzed
+                 FROM tokens WHERE mint = $1`,
+                [mint]
+            );
+
+            const lastCheck = parseInt(lastAnalysis?.holders_snapshot_check || 0);
+            const analysisAge = Date.now() - lastCheck;
+
+            // If analyzed within 24h AND we have valid data, return cached results
+            if (analysisAge < CONVICTION_ANALYSIS_TTL && lastAnalysis?.conviction_analyzed > 0) {
+                const cachedScore = lastAnalysis.conviction_score || 0;
+                const cachedAnalyzed = lastAnalysis.conviction_analyzed || 0;
+
+                logger.info(`[Conviction] ${mint.slice(0,8)}: SKIP - analyzed ${Math.round(analysisAge / 3600000)}h ago (score: ${cachedScore}%, ${cachedAnalyzed} holders) - 0 RPC`);
+
+                return {
+                    score: cachedScore,
+                    analyzed: cachedAnalyzed,
+                    accumulators: lastAnalysis.conviction_accumulators || 0,
+                    holders: lastAnalysis.conviction_holders || 0,
+                    reducers: lastAnalysis.conviction_reducers || 0,
+                    extractors: lastAnalysis.conviction_extractors || 0,
+                    realHoldersCount: lastAnalysis.real_holders || lastAnalysis.holders || 0,
+                    totalHolders: lastAnalysis.total_holders || lastAnalysis.holders || 0,
+                    allHolders: null,
+                    skipReason: '24h_ttl',
+                    preserveHolders: true  // Don't overwrite on-chain holder data
+                };
+            }
+        }
+
         // ============================================
         // WEBHOOK MODE: Use cached snapshots (0 API calls)
         // ============================================

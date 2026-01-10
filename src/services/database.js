@@ -877,7 +877,9 @@ async function initDB() {
                 run: async (text, params) => {
                     const res = await primaryPool.query(text, params);
                     return res.rows && res.rows.length > 0 ? res.rows[0] : { rowCount: res.rowCount };
-                }
+                },
+                // Get raw client for transactions (caller must release)
+                getClient: async () => primaryPool.connect(),
             };
 
             return dbWrapper;

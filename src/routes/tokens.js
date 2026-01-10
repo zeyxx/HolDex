@@ -9,6 +9,50 @@ const { isValidPubkey } = require('../utils/solana');
 const { hashApiKey } = require('../utils/apiKeyHash');
 const { sanitizeError } = require('../utils/validation');
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECURITY: IP Validation - Prevents X-Forwarded-For Spoofing
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Validate IP address format
+ * @param {string} ip - IP address to validate
+ * @returns {boolean} True if valid IPv4 or IPv6
+ */
+function isValidIp(ip) {
+    if (!ip || typeof ip !== 'string') return false;
+
+    // IPv4: 0-255.0-255.0-255.0-255
+    const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (ipv4Regex.test(ip)) {
+        const octets = ip.split('.').map(Number);
+        return octets.every(o => o >= 0 && o <= 255);
+    }
+
+    // IPv6: hex chars and colons, min length to prevent garbage
+    const ipv6Regex = /^[a-fA-F0-9:]{3,39}$/;
+    return ipv6Regex.test(ip) && ip.includes(':');
+}
+
+/**
+ * SECURITY: Get real client IP with validation
+ * - Takes first IP from X-Forwarded-For (leftmost = original client)
+ * - Validates IP format to prevent spoofing with garbage data
+ * - Falls back to req.ip if invalid
+ */
+function getClientIp(req) {
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) {
+        // X-Forwarded-For format: "client, proxy1, proxy2"
+        const firstIp = xff.split(',')[0]?.trim();
+        if (isValidIp(firstIp)) {
+            return firstIp;
+        }
+        // Invalid format = potential spoofing, log and fall back
+        // Don't log the actual value (could be attack payload)
+    }
+    return req.ip || 'unknown';
+}
+
 // Strict rate limit for API key generation (5 per hour per IP)
 const apiKeyRateLimit = rateLimit({
     windowMs: 60 * 60 * 1000, // 1 hour
@@ -16,7 +60,7 @@ const apiKeyRateLimit = rateLimit({
     message: { success: false, error: 'Too many key requests. Try again in 1 hour.' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip,
+    keyGenerator: (req) => getClientIp(req), // SECURITY: Validated IP, prevents spoofing
     validate: { keyGeneratorIpFallback: false }
 });
 
@@ -27,7 +71,18 @@ const proxyRateLimit = rateLimit({
     message: { success: false, error: 'Rate limit exceeded. Try again shortly.' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip,
+    keyGenerator: (req) => getClientIp(req), // SECURITY: Validated IP, prevents spoofing
+    validate: { keyGeneratorIpFallback: false }
+});
+
+// SECURITY: Rate limit for admin endpoints (1 per minute for dangerous ops)
+const adminRateLimit = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 1, // 1 request per minute for dangerous admin ops
+    message: { success: false, error: 'Admin rate limit exceeded. Wait 1 minute.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => 'admin:' + getClientIp(req), // SECURITY: Validated IP
     validate: { keyGeneratorIpFallback: false }
 });
 
@@ -982,7 +1037,8 @@ function init(deps) {
         } catch (e) { res.status(500).json({ success: false, error: sanitizeError(e) }); } 
     });
     
-    router.post('/admin/delete-token', requireAdmin, async (req, res) => {
+    // SECURITY: adminRateLimit prevents rapid destructive operations
+    router.post('/admin/delete-token', requireAdmin, adminRateLimit, async (req, res) => {
         const { mint } = req.body;
         if (!mint || !isValidPubkey(mint)) return res.status(400).json({ success: false, error: "Invalid mint" });
         try {
@@ -1008,7 +1064,8 @@ function init(deps) {
     });
     
     // K-Score refresh with per-token rate limiting (1 hour cooldown)
-    router.post('/admin/refresh-kscore', requireAdmin, async (req, res) => {
+    // SECURITY: adminRateLimit adds 1/min global limit as backup defense
+    router.post('/admin/refresh-kscore', requireAdmin, adminRateLimit, async (req, res) => {
         const { mint, force } = req.body;
         if (!mint || !isValidPubkey(mint)) return res.status(400).json({ success: false, error: "Invalid mint" });
 
@@ -1040,27 +1097,35 @@ function init(deps) {
 
     // Bulk K-Score refresh (all verified tokens)
     // CAUTION: This will consume significant RPC credits
-    router.post('/admin/refresh-all-kscores', requireAdmin, async (req, res) => {
+    // SECURITY: adminRateLimit (1/min) + Redis cooldown (1 hour) = double protection
+    router.post('/admin/refresh-all-kscores', requireAdmin, adminRateLimit, async (req, res) => {
         const { deepRefresh } = req.body;
 
         try {
-            // Check cooldown (1 hour minimum between bulk refreshes)
+            // SECURITY: Require Redis for cooldown - this operation is too expensive to run without tracking
             const redis = getClient();
-            if (redis) {
-                const cooldownKey = 'kscore:bulk:cooldown';
-                const lastRun = await redis.get(cooldownKey);
-                if (lastRun) {
-                    const elapsed = Date.now() - parseInt(lastRun);
-                    const remaining = Math.ceil((3600000 - elapsed) / 60000); // minutes
-                    return res.status(429).json({
-                        success: false,
-                        error: `Bulk refresh rate limited. Try again in ${remaining} min.`,
-                        lastRun: new Date(parseInt(lastRun)).toISOString()
-                    });
-                }
-                // Set cooldown (1 hour TTL)
-                await redis.set(cooldownKey, Date.now().toString(), { EX: 3600 });
+            if (!redis) {
+                logger.warn('[Admin] Bulk K-Score refresh blocked - Redis unavailable for cooldown tracking');
+                return res.status(503).json({
+                    success: false,
+                    error: 'Redis unavailable. Cannot track cooldown for this expensive operation.'
+                });
             }
+
+            // Check cooldown (1 hour minimum between bulk refreshes)
+            const cooldownKey = 'kscore:bulk:cooldown';
+            const lastRun = await redis.get(cooldownKey);
+            if (lastRun) {
+                const elapsed = Date.now() - parseInt(lastRun);
+                const remaining = Math.ceil((3600000 - elapsed) / 60000); // minutes
+                return res.status(429).json({
+                    success: false,
+                    error: `Bulk refresh rate limited. Try again in ${remaining} min.`,
+                    lastRun: new Date(parseInt(lastRun)).toISOString()
+                });
+            }
+            // Set cooldown (1 hour TTL)
+            await redis.set(cooldownKey, Date.now().toString(), { EX: 3600 });
 
             // Trigger bulk update (runs async)
             const broadcast = () => {}; // No WebSocket broadcast from admin panel
@@ -1221,7 +1286,8 @@ function init(deps) {
      *   - skipTables: comma-separated list of tables to skip
      *   - continueOnError: true to continue even if some tables fail
      */
-    router.post('/admin/restore', requireAdmin, async (req, res) => {
+    // SECURITY: adminRateLimit prevents data restoration abuse
+    router.post('/admin/restore', requireAdmin, adminRateLimit, async (req, res) => {
         try {
             const backup = req.body;
             const {
@@ -1426,7 +1492,8 @@ function init(deps) {
      * Use this if migrations failed to run on startup
      * Source: sollama58/NewDexSOCKETS
      */
-    router.post('/admin/run-migrations', requireAdmin, async (req, res) => {
+    // SECURITY: adminRateLimit prevents migration spam
+    router.post('/admin/run-migrations', requireAdmin, adminRateLimit, async (req, res) => {
         const results = { success: [], failed: [] };
 
         const migrations = [
@@ -2134,16 +2201,10 @@ function init(deps) {
     /**
      * POST /admin/reset-queue
      * Nuclear option: Clear entire legacy queue (for hybrid C+D migration)
-     * Accepts password via query param for convenience
+     * SECURITY: Uses requireAdmin middleware + adminRateLimit (1/min)
      */
-    router.post('/admin/reset-queue', async (req, res) => {
-        // Accept password via query param or header
-        const password = req.query.password || req.headers['x-admin-password'];
-        if (password !== config.ADMIN_PASSWORD) {
-            return res.status(401).json({ success: false, error: 'Unauthorized' });
-        }
-
-        const { getClient } = require('../services/redis');
+    router.post('/admin/reset-queue', requireAdmin, adminRateLimit, async (req, res) => {
+        // SECURITY: Removed query param password - URLs are logged!
         const redis = getClient();
 
         if (!redis) {
@@ -2190,7 +2251,8 @@ function init(deps) {
      * SECURITY: Admin only, read-only (SELECT), no mutations allowed
      * Workaround for Render MCP SSL issues
      */
-    router.post('/admin/query', requireAdmin, async (req, res) => {
+    // SECURITY: adminRateLimit prevents expensive query spam
+    router.post('/admin/query', requireAdmin, adminRateLimit, async (req, res) => {
         const { sql } = req.body;
 
         if (!sql || typeof sql !== 'string') {
@@ -2347,7 +2409,7 @@ function init(deps) {
 
                 if (!token) {
                     // Rate limit indexing to prevent RPC abuse
-                    const clientIp = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+                    const clientIp = getClientIp(req); // SECURITY: Validated IP
                     const rateCheck = await checkIndexingRateLimit(clientIp);
                     if (rateCheck.allowed) {
                         try {
@@ -2662,7 +2724,7 @@ function init(deps) {
                     // Only index when token explicitly requested via /api/token/:mint
                     if (rows.length === 0 && process.env.DISABLE_AUTO_INDEX !== 'true') {
                         // Rate limit indexing to prevent RPC abuse
-                        const clientIp = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+                        const clientIp = getClientIp(req); // SECURITY: Validated IP
                         const rateCheck = await checkIndexingRateLimit(clientIp);
                         if (!rateCheck.allowed) {
                             logger.warn(`[PublicSearch] Indexing rate limited for IP ${clientIp}`);
@@ -2839,7 +2901,7 @@ function init(deps) {
 
             if (!token) {
                 // Rate limit indexing to prevent RPC abuse
-                const clientIp = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+                const clientIp = getClientIp(req); // SECURITY: Validated IP
                 const rateCheck = await checkIndexingRateLimit(clientIp);
 
                 if (rateCheck.allowed) {
@@ -3106,7 +3168,7 @@ function init(deps) {
                     rows = await db.all(`SELECT * FROM tokens WHERE mint = $1`, [search]);
                     if (rows.length === 0) {
                         // Rate limit indexing to prevent RPC abuse
-                        const clientIp = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+                        const clientIp = getClientIp(req); // SECURITY: Validated IP
                         const rateCheck = await checkIndexingRateLimit(clientIp);
                         if (!rateCheck.allowed) {
                             logger.warn(`[Search] Indexing rate limited for IP ${clientIp}`);

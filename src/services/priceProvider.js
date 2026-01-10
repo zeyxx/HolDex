@@ -12,7 +12,8 @@
 
 const config = require('../config/env');
 const logger = require('./logger');
-const { getRedis: _getRedis } = require('./redis');
+const { getRedis } = require('./redis');
+const { waitForRateLimit } = require('./heliusRateLimiter');
 
 // ============================================
 // CONFIGURATION
@@ -133,9 +134,24 @@ const PYTH_CONF_OFFSET = 216;      // aggregate.conf (u64)
 
 /**
  * Get SOL/USD price from Pyth Oracle (on-chain)
+ * P6: Redis cache added (5 min TTL) to reduce RPC calls
  * @returns {Object|null} Price data or null if unavailable
  */
 async function getSolPricePyth() {
+    // P6: Check Redis cache first (5 min TTL)
+    const redis = getRedis();
+    const cacheKey = 'price:sol:pyth';
+
+    if (redis) {
+        try {
+            const cached = await redis.get(cacheKey);
+            if (cached) {
+                logger.debug('[Pyth] Cache HIT for SOL/USD');
+                return JSON.parse(cached);
+            }
+        } catch (_e) { /* cache miss */ }
+    }
+
     try {
         const { PublicKey, Connection } = require('@solana/web3.js');
 
@@ -144,6 +160,12 @@ async function getSolPricePyth() {
         const rpcUrl = config.HELIUS_API_KEY
             ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
             : 'https://api.mainnet-beta.solana.com';
+
+        // P6: Rate limit before RPC call (if using Helius)
+        if (config.HELIUS_API_KEY) {
+            await waitForRateLimit();
+        }
+
         const connection = new Connection(rpcUrl, 'confirmed');
 
         const accountInfo = await connection.getAccountInfo(
@@ -175,13 +197,20 @@ async function getSolPricePyth() {
 
         logger.debug(`[Pyth] SOL/USD: $${price.toFixed(2)} (±$${confidence.toFixed(4)})`);
 
-        return {
+        const result = {
             price,
             confidence,
             source: 'pyth_oracle',
             onChain: true,
             timestamp: Date.now()
         };
+
+        // P6: Cache the result (5 min TTL)
+        if (redis) {
+            redis.set(cacheKey, JSON.stringify(result), 'EX', 300).catch(() => {});
+        }
+
+        return result;
 
     } catch (e) {
         logger.debug(`[Pyth] SOL price fetch error: ${e.message}`);
@@ -639,6 +668,19 @@ function derivePumpFunBondingCurve(mint) {
  * @returns {Object|null} Price data or null if not on curve
  */
 async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
+    // P6: Check Redis cache first (30s TTL for on-chain prices)
+    const redis = getRedis();
+    const cacheKey = `price:pumpfun:${mint}`;
+
+    if (redis) {
+        try {
+            const cached = await redis.get(cacheKey);
+            if (cached) {
+                return JSON.parse(cached);
+            }
+        } catch (_e) { /* cache miss */ }
+    }
+
     try {
         const { PublicKey, Connection } = require('@solana/web3.js');
 
@@ -648,6 +690,11 @@ async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
                 ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
                 : HELIUS_RPC_URL;
             connection = new Connection(heliusUrl, 'confirmed');
+        }
+
+        // P6: Rate limit before RPC call
+        if (config.HELIUS_API_KEY) {
+            await waitForRateLimit();
         }
 
         // Derive bonding curve PDA
@@ -703,7 +750,7 @@ async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
 
         logger.debug(`[PumpFun] On-chain price for ${mint}: $${priceUsd.toFixed(12)} (bonding curve)`);
 
-        return {
+        const result = {
             priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
             mcap: clampValue(mcap, PRICE_BOUNDS.MIN_MCAP, PRICE_BOUNDS.MAX_MCAP),
             liquidity: clampValue(liquidityUsd, PRICE_BOUNDS.MIN_LIQUIDITY, PRICE_BOUNDS.MAX_LIQUIDITY),
@@ -723,6 +770,13 @@ async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
                 sol: Number(virtualSolReserves)
             }
         };
+
+        // P6: Cache result (30s TTL for on-chain prices)
+        if (redis) {
+            redis.set(cacheKey, JSON.stringify(result), 'EX', 30).catch(() => {});
+        }
+
+        return result;
 
     } catch (e) {
         logger.debug(`[PumpFun] Bonding curve fetch error for ${mint}: ${e.message}`);
@@ -775,6 +829,11 @@ async function fetchPumpFunOnChainPrices(mints) {
             const pubkeys = batch.map(b => b.pda);
 
             try {
+                // P6: Rate limit before batch RPC call
+                if (config.HELIUS_API_KEY) {
+                    await waitForRateLimit();
+                }
+
                 const accounts = await connection.getMultipleAccountsInfo(pubkeys);
 
                 for (let j = 0; j < accounts.length; j++) {

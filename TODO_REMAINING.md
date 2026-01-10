@@ -30,14 +30,13 @@ Action: Skip indexTokenOnChain() et GeckoTerminal backfill
 Économie: ~50 RPC par recherche unknown token
 ```
 
-### P6: Cache Agressif priceProvider.js
+### ✅ P6: Cache Agressif priceProvider.js (DONE)
 ```
 Fichier: src/services/priceProvider.js
-Fonctions à cacher:
-  - getPythPrice() - TTL 30s
-  - getRaydiumPoolPrice() - TTL 30s
-  - getPumpFunPrice() - TTL 30s
-Pattern: Redis cache avec fallback
+Fonctions cachées:
+  - getSolPricePyth() - Redis 5min TTL + rate limit
+  - fetchPumpFunBondingCurvePrice() - Redis 30s TTL + rate limit
+  - fetchPumpFunOnChainPrices() - rate limit par batch
 ```
 
 ### P7: Audit getEnhancedTransactions

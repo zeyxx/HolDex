@@ -143,7 +143,7 @@ async function getHolderCountFromRPC(mintAddress) {
     if (!mintAddress) return 0;
     const cleanMint = mintAddress.trim();
 
-    // Check Redis cache first (5 min TTL)
+    // Check Redis cache first (30 min TTL - holder counts don't change rapidly)
     try {
         const redis = getRedis();
         if (redis) {
@@ -217,12 +217,12 @@ async function getHolderCountFromRPC(mintAddress) {
         }
     }
 
-    // Cache the result (5 min TTL)
+    // Cache the result (30 min TTL - reduces RPC calls by ~90%)
     try {
         const redis = getRedis();
         if (redis && finalCount > 0) {
             const cacheKey = `holders:count:${cleanMint}`;
-            await redis.set(cacheKey, finalCount.toString(), 'EX', 300);
+            await redis.set(cacheKey, finalCount.toString(), 'EX', 1800);
             logger.debug(`[Holders] Cached count for ${cleanMint.slice(0, 8)}: ${finalCount}`);
         }
     } catch (e) {
@@ -238,9 +238,26 @@ async function getHolderCountFromRPC(mintAddress) {
  *
  * NOTE: Uses getSignaturesForAddress (faster for timestamp-only queries)
  * For full parsed transaction data, use provider.getTransactionsForAddress()
+ *
+ * OPTIMIZATION: Cached for 1 hour (saves ~16 RPC credits per call)
  */
 async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
     const provider = getRPCProvider();
+    const cleanMint = mintAddress?.toString().trim();
+    if (!cleanMint) return { avgHoldHours: 0 };
+
+    // Check cache first (1 hour TTL - conviction metrics are stable)
+    try {
+        const redis = getRedis();
+        if (redis) {
+            const cacheKey = `conviction:${cleanMint}`;
+            const cached = await redis.get(cacheKey);
+            if (cached) {
+                logger.debug(`[Conviction] Cache hit for ${cleanMint.slice(0, 8)}`);
+                return JSON.parse(cached);
+            }
+        }
+    } catch (_e) { /* ignore cache errors */ }
 
     try {
         // Use provider's getTokenLargestAccounts with fallback
@@ -278,7 +295,20 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
             } catch (_err) { /* ignore */ }
         }
         if (validSamples === 0) return { avgHoldHours: 0 };
-        return { avgHoldHours: (totalDuration / validSamples) / 3600 };
+
+        const result = { avgHoldHours: (totalDuration / validSamples) / 3600 };
+
+        // Cache result for 1 hour
+        try {
+            const redis = getRedis();
+            if (redis) {
+                const cacheKey = `conviction:${cleanMint}`;
+                await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
+                logger.debug(`[Conviction] Cached for ${cleanMint.slice(0, 8)}: ${result.avgHoldHours.toFixed(1)}h`);
+            }
+        } catch (_e) { /* ignore cache errors */ }
+
+        return result;
     } catch (_e) {
         return { avgHoldHours: 0 };
     }

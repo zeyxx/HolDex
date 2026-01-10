@@ -17,9 +17,10 @@ const os = require('os');
 
 // Credit budgets (customize based on your Helius plan)
 // Docs: https://www.helius.dev/docs/billing/plans#credit-system
+// Developer plan: 10M credits/month = ~333k/day = ~14k/hour
 const BUDGET = {
-    DAILY: parseInt(process.env.HELIUS_DAILY_BUDGET) || 500000,   // Free: 500k/month ≈ 16k/day
-    HOURLY: parseInt(process.env.HELIUS_HOURLY_BUDGET) || 1000,   // ~40 credits/min avg
+    DAILY: parseInt(process.env.HELIUS_DAILY_BUDGET) || 333000,   // Developer: 10M/month ≈ 333k/day
+    HOURLY: parseInt(process.env.HELIUS_HOURLY_BUDGET) || 14000,  // ~233 credits/min avg
     ALERT_THRESHOLD: 0.80,                                         // Alert at 80% usage
     CRITICAL_THRESHOLD: 0.95                                       // Critical at 95% usage
 };

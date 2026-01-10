@@ -4,6 +4,9 @@ const logger = require('./logger');
 const { getRedis } = require('./redis');
 const { getRPCProvider, getConnection } = require('./rpcProvider');
 
+// φ-based sampling and cache TTLs (SINGLE SOURCE OF TRUTH)
+const { CACHE_TTL, SAMPLING } = require('./rpcHarmony');
+
 let connection = null;
 
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -143,7 +146,7 @@ async function getHolderCountFromRPC(mintAddress) {
     if (!mintAddress) return 0;
     const cleanMint = mintAddress.trim();
 
-    // Check Redis cache first (30 min TTL - holder counts don't change rapidly)
+    // Check Redis cache first (φ-based TTL from rpcHarmony)
     try {
         const redis = getRedis();
         if (redis) {
@@ -167,15 +170,14 @@ async function getHolderCountFromRPC(mintAddress) {
             let count = 0;
             let cursor = null;
 
-            // Paginate through holders (cap at 5 pages = 5k holders)
+            // Fibonacci-based pagination (SAMPLING.DAS_MAX_PAGES = 5)
             // Most tokens have <5k holders; early exit saves credits
-            const MAX_PAGES = 5;
             let page = 0;
 
-            while (page < MAX_PAGES) {
+            while (page < SAMPLING.DAS_MAX_PAGES) {
                 // Provider handles rate limiting internally
                 const result = await provider.getTokenAccounts(cleanMint, {
-                    limit: 1000,
+                    limit: SAMPLING.DAS_PAGE_SIZE,
                     cursor
                 });
 
@@ -190,8 +192,8 @@ async function getHolderCountFromRPC(mintAddress) {
                     if (acc.amount > 0) count++;
                 }
 
-                // Early exit: if page has <1000 results, we've reached the end
-                if (pageCount < 1000) {
+                // Early exit: if page has <PAGE_SIZE results, we've reached the end
+                if (pageCount < SAMPLING.DAS_PAGE_SIZE) {
                     logger.debug(`[Holders] Early exit at page ${page + 1} (${pageCount} accounts)`);
                     break;
                 }
@@ -225,13 +227,13 @@ async function getHolderCountFromRPC(mintAddress) {
         }
     }
 
-    // Cache the result (30 min TTL - reduces RPC calls by ~90%)
+    // Cache the result (φ-based TTL from CACHE_TTL.HOLDER_COUNT)
     try {
         const redis = getRedis();
         if (redis && finalCount > 0) {
             const cacheKey = `holders:count:${cleanMint}`;
-            await redis.set(cacheKey, finalCount.toString(), 'EX', 1800);
-            logger.debug(`[Holders] Cached count for ${cleanMint.slice(0, 8)}: ${finalCount}`);
+            await redis.set(cacheKey, finalCount.toString(), 'EX', CACHE_TTL.HOLDER_COUNT);
+            logger.debug(`[Holders] Cached count for ${cleanMint.slice(0, 8)}: ${finalCount} (TTL: ${CACHE_TTL.HOLDER_COUNT}s)`);
         }
     } catch (e) {
         logger.debug(`[Holders] Cache write failed: ${e.message}`);
@@ -281,14 +283,14 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
         let validSamples = 0;
         const excludeSet = new Set(excludeAddresses.map(a => a ? a.toString() : ''));
 
-        // Sample top 5 holders only (saves 10 RPC calls vs 15, statistically sufficient)
+        // Fibonacci-based sampling (SAMPLING.CONVICTION_SAMPLES = 5, statistically sufficient)
         for (const acc of topAccounts) {
-            if (validSamples >= 5) break;
+            if (validSamples >= SAMPLING.CONVICTION_SAMPLES) break;
             if (excludeSet.has(acc.address.toString())) continue;
 
             try {
                 // getSignaturesForAddress is optimal for timestamp-only queries (168ms vs 1000ms+)
-                const signatures = await provider.getSignaturesForAddress(acc.address, { limit: 20 });
+                const signatures = await provider.getSignaturesForAddress(acc.address, { limit: SAMPLING.CONVICTION_DEPTH });
 
                 // Note: RPC tracking handled in helius.js provider
 
@@ -307,13 +309,13 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
 
         const result = { avgHoldHours: (totalDuration / validSamples) / 3600 };
 
-        // Cache result for 1 hour
+        // Cache result (φ-based TTL from CACHE_TTL.CONVICTION)
         try {
             const redis = getRedis();
             if (redis) {
                 const cacheKey = `conviction:${cleanMint}`;
-                await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
-                logger.debug(`[Conviction] Cached for ${cleanMint.slice(0, 8)}: ${result.avgHoldHours.toFixed(1)}h`);
+                await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL.CONVICTION);
+                logger.debug(`[Conviction] Cached for ${cleanMint.slice(0, 8)}: ${result.avgHoldHours.toFixed(1)}h (TTL: ${CACHE_TTL.CONVICTION}s)`);
             }
         } catch (_e) { /* ignore cache errors */ }
 

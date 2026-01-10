@@ -1,70 +1,41 @@
 /**
  * RPC Credit Monitoring and Budgeting System
+ * ═══════════════════════════════════════════════════════════════════════════════
  *
- * Tracks Helius RPC usage to prevent runaway credit consumption
+ * Multi-node Redis-based credit tracking for Helius RPC usage.
+ *
+ * φ-INTEGRATION:
+ *   - BUDGET, CREDIT_COSTS imported from rpcHarmony.js (φ-based formulas)
+ *   - Redis keys enable distributed tracking across all nodes
+ *   - Per-node attribution for debugging and optimization
+ *
  * Features:
- * - Per-hour credit tracking
- * - Per-node credit tracking (API, Calculator, Listener, Worker)
- * - Budget alerts at 80% threshold
- * - Daily/weekly aggregation
- * - Per-operation breakdown
- * - 24h historical breakdown
+ *   - Per-hour/day credit tracking
+ *   - Per-node credit tracking (API, Calculator, Listener, Worker)
+ *   - φ-based alert thresholds (61.8%, 76.4%, 76.4%)
+ *   - 24h historical breakdown
  */
 
 const { getRedis } = require('./redis');
 const logger = require('./logger');
 const os = require('os');
 
-// Credit budgets (customize based on your Helius plan)
-// Docs: https://www.helius.dev/docs/billing/plans#credit-system
-// Developer plan: 10M credits/month = ~333k/day = ~14k/hour
-const BUDGET = {
-    DAILY: parseInt(process.env.HELIUS_DAILY_BUDGET) || 333000,   // Developer: 10M/month ≈ 333k/day
-    HOURLY: parseInt(process.env.HELIUS_HOURLY_BUDGET) || 14000,  // ~233 credits/min avg
-    ALERT_THRESHOLD: 0.80,                                         // Alert at 80% usage
-    CRITICAL_THRESHOLD: 0.95                                       // Critical at 95% usage
-};
+// Import φ-based constants from harmony module (SINGLE SOURCE OF TRUTH)
+const {
+    BUDGET,
+    CREDIT_COSTS,
+    getCreditCost: getHarmonyCreditCost,
+    getHealthFromPercent
+} = require('./rpcHarmony');
 
-// Helius credit costs per method type
-// https://www.helius.dev/docs/billing/plans#credit-system
-const CREDIT_COSTS = {
-    // Standard RPC (1 credit each)
-    getAccountInfo: 1,
-    getBalance: 1,
-    getBlock: 1,
-    getBlockHeight: 1,
-    getSlot: 1,
-    getTokenAccountBalance: 1,
-    getTokenLargestAccounts: 1,
-    getSignaturesForAddress: 1,
-    getTransaction: 1,
-    getProgramAccounts: 1,
-    getMultipleAccounts: 1,
-
-    // DAS API (5-10 credits)
-    getAsset: 5,
-    getAssetsByOwner: 10,
-    getAssetsByGroup: 10,
-    getTokenAccounts: 10,
-    searchAssets: 10,
-
-    // Enhanced APIs (10-100 credits)
-    getTransactionsForAddress: 100,
-    parseTransaction: 10,
-    getEnhancedTransactions: 100,
-
-    // Default for unknown methods
-    default: 1
-};
-
-// Node identification
+// Node identification for multi-node tracking
 const NODE_ID = process.env.NODE_ID || `${process.env.SERVICE_TYPE || 'api'}-${os.hostname().slice(-8)}`;
 
 /**
- * Get credit cost for a method
+ * Get credit cost for a method (proxy to rpcHarmony)
  */
 function getCreditCost(method) {
-    return CREDIT_COSTS[method] || CREDIT_COSTS.default;
+    return getHarmonyCreditCost(method);
 }
 
 /**
@@ -110,17 +81,17 @@ async function trackRpcCall(method, credits = 1, _metadata = {}) {
         const hourlyPercent = hourlyUsage / BUDGET.HOURLY;
         const dailyPercent = dailyUsage / BUDGET.DAILY;
 
-        // Alert on threshold breach
-        if (hourlyPercent >= BUDGET.CRITICAL_THRESHOLD) {
-            logger.error(`🚨 CRITICAL: Helius credits at ${Math.round(hourlyPercent * 100)}% of hourly budget (${hourlyUsage}/${BUDGET.HOURLY})`);
-        } else if (hourlyPercent >= BUDGET.ALERT_THRESHOLD) {
-            logger.warn(`⚠️  WARNING: Helius credits at ${Math.round(hourlyPercent * 100)}% of hourly budget (${hourlyUsage}/${BUDGET.HOURLY})`);
-        }
+        // Alert on threshold breach (φ-based 3-tier system)
+        // 61.8% → alert, 76.4% → warning, 76.4% → critical
+        const healthStatus = getHealthFromPercent(hourlyPercent, dailyPercent);
 
-        if (dailyPercent >= BUDGET.CRITICAL_THRESHOLD) {
-            logger.error(`🚨 CRITICAL: Helius credits at ${Math.round(dailyPercent * 100)}% of daily budget (${dailyUsage}/${BUDGET.DAILY})`);
-        } else if (dailyPercent >= BUDGET.ALERT_THRESHOLD && dailyPercent % 0.05 < 0.01) { // Alert every 5%
-            logger.warn(`⚠️  WARNING: Helius credits at ${Math.round(dailyPercent * 100)}% of daily budget (${dailyUsage}/${BUDGET.DAILY})`);
+        if (healthStatus === 'critical') {
+            logger.error(`🚨 CRITICAL: Helius credits at ${Math.round(hourlyPercent * 100)}% hourly, ${Math.round(dailyPercent * 100)}% daily`);
+        } else if (healthStatus === 'warning') {
+            logger.warn(`⚠️  WARNING: Helius credits at ${Math.round(hourlyPercent * 100)}% hourly, ${Math.round(dailyPercent * 100)}% daily`);
+        } else if (healthStatus === 'alert' && Math.floor(hourlyPercent * 20) !== Math.floor((hourlyPercent - 0.05) * 20)) {
+            // Alert once per 5% increment
+            logger.info(`📊 ALERT: Helius credits at ${Math.round(hourlyPercent * 100)}% hourly (φ⁻¹ threshold)`);
         }
 
         // Log debug info

@@ -18,12 +18,14 @@ const { getRedis: _getRedis } = require('./redis');
 // CONFIGURATION
 // ============================================
 
-// Jupiter Price API V3 - uses api.jup.ag with API key
-// Set JUPITER_API_KEY in environment (required for api.jup.ag)
-// Get your API key at: https://portal.jup.ag/
+// Jupiter Price API - uses lite-api.jup.ag (free, no key required)
+// Lite tier: 60 requests per 60 seconds (1 req/sec average)
+// For higher limits, get API key at: https://portal.jup.ag/
 const JUPITER_API_KEY = config.JUPITER_API_KEY || process.env.JUPITER_API_KEY;
-const JUPITER_PRICE_URL = 'https://api.jup.ag/price/v3';
-const JUPITER_BATCH_SIZE = 50; // Jupiter V3 allows up to 50 tokens per request
+const JUPITER_PRICE_URL = JUPITER_API_KEY
+    ? 'https://api.jup.ag/price/v2'      // Pro tier with API key
+    : 'https://lite-api.jup.ag/price/v2'; // Free tier, no key needed
+const JUPITER_BATCH_SIZE = 100; // Jupiter allows up to 100 tokens per request
 
 // Helius RPC for on-chain data
 const HELIUS_RPC_URL = 'https://mainnet.helius-rpc.com';
@@ -139,9 +141,10 @@ async function fetchJupiterPrices(mints, retryCount = 0) {
     // Jupiter batch: comma-separated, max 100
     const batchMints = mints.slice(0, JUPITER_BATCH_SIZE);
     const ids = batchMints.join(',');
+    // V2 API: ids param, showExtraInfo for additional data
     const url = `${JUPITER_PRICE_URL}?ids=${ids}&showExtraInfo=true`;
 
-    // Build headers - include API key if available
+    // Build headers - include API key if available (for Pro tier)
     const headers = {};
     if (JUPITER_API_KEY) {
         headers['x-api-key'] = JUPITER_API_KEY;
@@ -177,31 +180,36 @@ async function fetchJupiterPrices(mints, retryCount = 0) {
         const data = await response.json();
         const now = Date.now();
 
-        // Process Jupiter V3 response
-        // V3 format: { data: { [mint]: { usdPrice, decimals, blockId, priceChange24h } } }
+        // Process Jupiter V2 response
+        // V2 format: { data: { [mint]: { id, type, price, extraInfo? } } }
         const priceData = data?.data || data;
 
         for (const mint of batchMints) {
             const tokenData = priceData[mint];
             if (!tokenData) continue;
 
-            // Jupiter V3 returns usdPrice (not price)
-            const priceUsd = parseFloat(tokenData.usdPrice) || parseFloat(tokenData.price) || 0;
+            // V2 uses 'price' field (string), V3 uses 'usdPrice'
+            const priceUsd = parseFloat(tokenData.price) || parseFloat(tokenData.usdPrice) || 0;
             if (priceUsd <= 0) continue;
+
+            // V2 extraInfo contains additional data when showExtraInfo=true
+            const extraInfo = tokenData.extraInfo || {};
+            const quotedPrice = extraInfo.quotedPrice || {};
 
             results.set(mint, {
                 priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
-                // Jupiter V3 provides these fields
-                decimals: tokenData.decimals || 9,
-                blockId: tokenData.blockId || null,
-                // 24h change available in V3
-                change24h: clampValue(tokenData.priceChange24h, PRICE_BOUNDS.MIN_CHANGE_PCT, PRICE_BOUNDS.MAX_CHANGE_PCT),
-                // Volume not available in V3 - will get from Raydium
-                volume24h: 0,
+                // V2 provides confidence score
+                confidenceLevel: extraInfo.confidenceLevel || 'medium',
+                // Buy/sell prices from extraInfo
+                buyPrice: quotedPrice.buyPrice ? parseFloat(quotedPrice.buyPrice) : null,
+                sellPrice: quotedPrice.sellPrice ? parseFloat(quotedPrice.sellPrice) : null,
+                // No 24h change in V2 free tier - will get from Raydium if needed
+                change24h: null,
+                volume24h: null,
                 // Metadata
                 source: 'jupiter',
                 timestamp: now,
-                confidence: 'high'
+                confidence: extraInfo.confidenceLevel === 'high' ? 'high' : 'medium'
             });
         }
 

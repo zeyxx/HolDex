@@ -87,27 +87,57 @@ const adminRateLimit = rateLimit({
 });
 
 // SECURITY: Rate limiter for token indexing (prevents RPC abuse via CA search spam)
-// Limits: 10 new token indexing requests per IP per minute
+// Two-layer protection: Global limit + Per-IP limit
 const INDEX_RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
-const INDEX_RATE_LIMIT_MAX = 10; // 10 indexing requests per minute per IP
+const INDEX_RATE_LIMIT_MAX_PER_IP = 10;       // 10 indexing requests per minute per IP
+const INDEX_RATE_LIMIT_MAX_GLOBAL = 50;       // 50 total indexing requests per minute (botnet protection)
 
 async function checkIndexingRateLimit(ip) {
     const redis = getClient();
-    if (!redis) return { allowed: true }; // Allow if Redis unavailable
 
-    const key = `indexing_ratelimit:${ip}`;
+    // SECURITY: If Redis unavailable, BLOCK indexing (expensive operation)
+    // This prevents attackers from timing Redis downtime
+    if (!redis) {
+        logger.warn('[Indexing] Rate limit blocked - Redis unavailable');
+        return { allowed: false, retryAfter: 60, reason: 'redis_unavailable' };
+    }
+
+    const ipKey = `indexing_ratelimit:${ip}`;
+    const globalKey = 'indexing_ratelimit:global';
+
     try {
-        const current = await redis.incr(key);
-        if (current === 1) {
-            await redis.pexpire(key, INDEX_RATE_LIMIT_WINDOW_MS);
+        // Check global limit first (botnet protection)
+        const globalCurrent = await redis.incr(globalKey);
+        if (globalCurrent === 1) {
+            await redis.pexpire(globalKey, INDEX_RATE_LIMIT_WINDOW_MS);
         }
-        if (current > INDEX_RATE_LIMIT_MAX) {
-            const ttl = await redis.pttl(key);
-            return { allowed: false, retryAfter: Math.ceil(ttl / 1000) };
+        if (globalCurrent > INDEX_RATE_LIMIT_MAX_GLOBAL) {
+            const ttl = await redis.pttl(globalKey);
+            logger.warn(`[Indexing] Global rate limit hit: ${globalCurrent}/${INDEX_RATE_LIMIT_MAX_GLOBAL}`);
+            return { allowed: false, retryAfter: Math.ceil(ttl / 1000), reason: 'global_limit' };
         }
-        return { allowed: true, remaining: INDEX_RATE_LIMIT_MAX - current };
+
+        // Then check per-IP limit
+        const ipCurrent = await redis.incr(ipKey);
+        if (ipCurrent === 1) {
+            await redis.pexpire(ipKey, INDEX_RATE_LIMIT_WINDOW_MS);
+        }
+        if (ipCurrent > INDEX_RATE_LIMIT_MAX_PER_IP) {
+            // Decrement global counter since we're rejecting
+            await redis.decr(globalKey);
+            const ttl = await redis.pttl(ipKey);
+            return { allowed: false, retryAfter: Math.ceil(ttl / 1000), reason: 'ip_limit' };
+        }
+
+        return {
+            allowed: true,
+            remaining: INDEX_RATE_LIMIT_MAX_PER_IP - ipCurrent,
+            globalRemaining: INDEX_RATE_LIMIT_MAX_GLOBAL - globalCurrent
+        };
     } catch (_e) {
-        return { allowed: true }; // Allow on Redis error
+        // SECURITY: Block on Redis error (don't allow expensive operations without tracking)
+        logger.warn('[Indexing] Rate limit blocked - Redis error');
+        return { allowed: false, retryAfter: 60, reason: 'redis_error' };
     }
 }
 const { smartCache, aggregateAndSaveToken } = require('../services/database');

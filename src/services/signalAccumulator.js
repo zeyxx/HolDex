@@ -212,8 +212,12 @@ class SignalAccumulator {
 
         try {
             await redis.sadd(REGISTERED_NODES_KEY, NODE_ID);
-            // Set TTL on node registration (auto-expire if node dies)
             await redis.hset('holdex:node_heartbeats', NODE_ID, Date.now());
+            // Set TTL on heartbeats hash (5 min) - prevents orphaned entries if all nodes die
+            // TTL refreshed every heartbeat (60s), so hash survives as long as any node is alive
+            await redis.expire('holdex:node_heartbeats', 300);
+            // Also expire registered nodes set
+            await redis.expire(REGISTERED_NODES_KEY, 300);
             logger.debug(`🔗 [Node] Registered ${NODE_ID}`);
         } catch (err) {
             logger.error(`[Node] Registration failed: ${err.message}`);
@@ -398,11 +402,13 @@ class SignalAccumulator {
             }
 
             // Track unique wallets (hashed for privacy)
-            if (signal.wallets) {
+            // Cap at 200 to prevent memory bloat - sufficient for signal analysis
+            if (signal.wallets && data.unique_wallets.length < 200) {
                 for (const wallet of signal.wallets) {
                     const hashed = hashWallet(wallet);
                     if (hashed && !data.unique_wallets.includes(hashed)) {
                         data.unique_wallets.push(hashed);
+                        if (data.unique_wallets.length >= 200) break;
                     }
                 }
             }
@@ -416,8 +422,8 @@ class SignalAccumulator {
                 }
             }
 
-            // Track sources
-            if (signal.source && !data.sources.includes(signal.source)) {
+            // Track sources (cap at 20 - most tokens have 1-3 sources)
+            if (signal.source && !data.sources.includes(signal.source) && data.sources.length < 20) {
                 data.sources.push(signal.source);
             }
 

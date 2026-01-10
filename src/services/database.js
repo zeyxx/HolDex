@@ -1316,6 +1316,7 @@ async function cacheKnownTokens(mints) {
 
 /**
  * Preload known mints cache from DB (call on startup)
+ * Clears existing cache first to prevent unbounded growth from stale entries
  * @returns {Promise<number>} - Number of mints cached
  */
 async function preloadKnownMintsCache() {
@@ -1324,6 +1325,11 @@ async function preloadKnownMintsCache() {
     if (!db || !redis) return 0;
 
     try {
+        // Clear existing cache to prevent unbounded growth
+        // This ensures cache reflects current DB state only
+        await redis.del(KNOWN_MINTS_KEY);
+        await redis.del(UNKNOWN_MINTS_KEY);
+
         const mints = await db.all('SELECT mint FROM tokens');
         if (mints.length > 0) {
             const mintAddresses = mints.map(m => m.mint);
@@ -1332,7 +1338,10 @@ async function preloadKnownMintsCache() {
                 const chunk = mintAddresses.slice(i, i + 1000);
                 await redis.sadd(KNOWN_MINTS_KEY, ...chunk);
             }
-            logger.info(`🚀 Preloaded ${mints.length} known mints to Redis cache`);
+            // Set TTL on the set - 4 hours, refreshed on next restart
+            // This prevents unbounded growth if service runs for extended periods
+            await redis.expire(KNOWN_MINTS_KEY, 4 * 60 * 60);
+            logger.info(`🚀 Preloaded ${mints.length} known mints to Redis cache (TTL: 4h)`);
         }
         return mints.length;
     } catch (e) {

@@ -96,6 +96,10 @@ let solPriceCache = { price: 0, timestamp: 0, lastAttempt: 0 };
 const SOL_CACHE_DURATION = 300000; // 5 minutes
 const SOL_RETRY_COOLDOWN = 60000;  // 1 minute
 
+// SECURITY: Thundering herd protection for Pyth Oracle
+// Only one request fetches at a time, others wait or use cached
+let pythInflightPromise = null;
+
 // ============================================
 // BOUNDS VALIDATION
 // ============================================
@@ -237,6 +241,9 @@ async function getSolPriceCoinGecko() {
  * Get SOL/USD price with fallback chain
  * Priority: Pyth Oracle (on-chain) > CoinGecko (API)
  * Philosophy: "onchain in truth" - prefer on-chain sources
+ *
+ * SECURITY: Thundering herd protection via pythInflightPromise
+ * Prevents cache miss storm from draining RPC credits
  */
 async function getSolPrice() {
     const now = Date.now();
@@ -251,38 +258,61 @@ async function getSolPrice() {
         return solPriceCache.price || 190;
     }
 
-    solPriceCache.lastAttempt = now;
-
-    // 1. PRIMARY: Try Pyth Oracle (on-chain)
-    const pythResult = await getSolPricePyth();
-    if (pythResult && pythResult.price > 0) {
-        solPriceCache = {
-            price: pythResult.price,
-            timestamp: now,
-            lastAttempt: now,
-            source: 'pyth_oracle'
-        };
-        return pythResult.price;
+    // SECURITY: Thundering herd protection
+    // If a request is already in flight, wait for it instead of making a new one
+    if (pythInflightPromise) {
+        try {
+            const result = await pythInflightPromise;
+            if (result > 0) return result;
+        } catch (_e) {
+            // Inflight request failed, proceed with our own attempt
+        }
+        // Return cached if inflight failed and we have a value
+        if (solPriceCache.price > 0) return solPriceCache.price;
     }
 
-    // 2. FALLBACK: CoinGecko (off-chain)
-    logger.debug('[PriceProvider] Pyth unavailable, falling back to CoinGecko');
-    const geckoPrice = await getSolPriceCoinGecko();
+    // Create a new inflight promise
+    pythInflightPromise = (async () => {
+        try {
+            solPriceCache.lastAttempt = now;
 
-    if (geckoPrice > 0) {
-        solPriceCache = {
-            price: geckoPrice,
-            timestamp: now,
-            lastAttempt: now,
-            source: 'coingecko'
-        };
-        logger.debug(`[PriceProvider] SOL: $${geckoPrice} (CoinGecko fallback)`);
-        return geckoPrice;
-    }
+            // 1. PRIMARY: Try Pyth Oracle (on-chain)
+            const pythResult = await getSolPricePyth();
+            if (pythResult && pythResult.price > 0) {
+                solPriceCache = {
+                    price: pythResult.price,
+                    timestamp: Date.now(),
+                    lastAttempt: Date.now(),
+                    source: 'pyth_oracle'
+                };
+                return pythResult.price;
+            }
 
-    // 3. EMERGENCY: Return cached or default
-    logger.warn('[PriceProvider] All SOL price sources failed, using cached/default');
-    return solPriceCache.price || 190;
+            // 2. FALLBACK: CoinGecko (off-chain)
+            logger.debug('[PriceProvider] Pyth unavailable, falling back to CoinGecko');
+            const geckoPrice = await getSolPriceCoinGecko();
+
+            if (geckoPrice > 0) {
+                solPriceCache = {
+                    price: geckoPrice,
+                    timestamp: Date.now(),
+                    lastAttempt: Date.now(),
+                    source: 'coingecko'
+                };
+                logger.debug(`[PriceProvider] SOL: $${geckoPrice} (CoinGecko fallback)`);
+                return geckoPrice;
+            }
+
+            // 3. EMERGENCY: Return cached or default
+            logger.warn('[PriceProvider] All SOL price sources failed, using cached/default');
+            return solPriceCache.price || 190;
+        } finally {
+            // Clear inflight promise when done
+            pythInflightPromise = null;
+        }
+    })();
+
+    return pythInflightPromise;
 }
 
 // ============================================

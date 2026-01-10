@@ -10,7 +10,8 @@
  * Architecture:
  *   Helius (primary) → Public (fallback)
  *
- * Enhanced APIs (Helius-only, no fallback):
+ * Enhanced APIs (Helius-only, graceful fallback):
+ *   - getTransactionsForAddress (replaces getSignaturesForAddress + getTransaction)
  *   - getEnhancedTransactions
  *   - getTokenAccounts (DAS)
  */
@@ -196,6 +197,41 @@ class RPCProvider {
         } catch (e) {
             await this.health.recordFailure('helius', e);
             throw e;
+        }
+    }
+
+    /**
+     * getTransactionsForAddress - Helius Enhanced RPC
+     *
+     * OPTIMIZATION: Single call replaces getSignaturesForAddress + getTransaction
+     * - 2-10x lower latency
+     * - Server-side sorting/filtering/pagination
+     * - Returns parsed transactions with timestamps
+     *
+     * Helius-only - falls back to getSignaturesForAddress if Helius unavailable
+     */
+    async getTransactionsForAddress(address, options = {}) {
+        if (!this.initialized) this.initialize();
+
+        const helius = this.providers.get('helius');
+        if (!helius) {
+            // Graceful fallback to standard RPC
+            logger.debug('[RPCProvider] getTransactionsForAddress falling back to getSignaturesForAddress');
+            return this.getSignaturesForAddress(address, options);
+        }
+
+        await waitForRateLimit();
+
+        try {
+            const start = Date.now();
+            const result = await helius.getTransactionsForAddress(address, options);
+            await this.health.recordSuccess('helius', Date.now() - start);
+            return result;
+        } catch (e) {
+            await this.health.recordFailure('helius', e);
+            // Fallback to standard on error
+            logger.warn(`[RPCProvider] getTransactionsForAddress failed, falling back: ${e.message}`);
+            return this.getSignaturesForAddress(address, options);
         }
     }
 

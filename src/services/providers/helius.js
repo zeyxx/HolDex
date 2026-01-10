@@ -71,6 +71,58 @@ class HeliusProvider {
         return conn.getSignaturesForAddress(pk, options);
     }
 
+    /**
+     * getTransactionsForAddress - Helius Enhanced RPC Method
+     *
+     * OPTIMIZATION: Replaces getSignaturesForAddress + getTransaction pattern
+     * - 2-10x lower latency (single call vs N+1 calls)
+     * - Server-side sorting/filtering/pagination
+     * - Returns fully parsed transactions
+     *
+     * @param {string} address - Wallet or account address
+     * @param {Object} options
+     * @param {number} options.limit - Max transactions (default 100, max 1000)
+     * @param {string} options.before - Signature to paginate before
+     * @param {string} options.until - Signature to paginate until
+     * @param {string} options.type - Filter by type (e.g., "SWAP", "TRANSFER")
+     * @param {string} options.source - Filter by source (e.g., "RAYDIUM", "JUPITER")
+     * @param {string} options.commitment - Commitment level
+     * @returns {Promise<Array>} Parsed transactions with timestamps, transfers, etc.
+     */
+    async getTransactionsForAddress(address, options = {}) {
+        const params = {
+            address: typeof address === 'string' ? address : address.toString(),
+            limit: options.limit || 100
+        };
+
+        // Optional filters
+        if (options.before) params.before = options.before;
+        if (options.until) params.until = options.until;
+        if (options.type) params.type = options.type;
+        if (options.source) params.source = options.source;
+        if (options.commitment) params.commitment = options.commitment;
+
+        const response = await fetch(this.rpcUrlBase, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.apiKey}`
+            },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: Date.now(),
+                method: 'getTransactionsForAddress',
+                params
+            })
+        });
+
+        const data = await response.json();
+        if (data.error) {
+            throw new Error(data.error.message || 'getTransactionsForAddress failed');
+        }
+        return data.result || [];
+    }
+
     async getProgramAccounts(programId, config) {
         const conn = this.getConnection();
         const pk = typeof programId === 'string' ? new PublicKey(programId) : programId;

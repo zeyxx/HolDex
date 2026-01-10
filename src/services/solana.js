@@ -3,6 +3,7 @@ const config = require('../config/env');
 const logger = require('./logger');
 const { getRedis } = require('./redis');
 const rpcMonitor = require('./rpcMonitor');
+const { waitForRateLimit } = require('./heliusRateLimiter');
 
 let connection = null;
 
@@ -175,6 +176,9 @@ async function getHolderCountFromRPC(mintAddress) {
             let page = 0;
 
             while (page < MAX_PAGES) {
+                // P4: Global rate limit check before Helius call
+                await waitForRateLimit();
+
                 const params = { mint: cleanMint, limit: 1000 };
                 if (cursor) params.cursor = cursor;
 

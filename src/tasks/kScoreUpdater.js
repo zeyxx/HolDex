@@ -37,6 +37,7 @@ const nodeService = require('../services/nodeService');
 const signedWrites = require('../services/signedWrites');
 const nodeKeys = require('../utils/nodeKeys');
 const rpcMonitor = require('../services/rpcMonitor');
+const { waitForRateLimit: waitForGlobalRateLimit } = require('../services/heliusRateLimiter');
 const { recordJudgmentOutcome } = require('../services/signalAccumulator');
 
 // ============================================
@@ -746,8 +747,13 @@ async function setPoolsInCache(entries) {
 // HELIUS API FUNCTIONS
 // ============================================
 
+// P4: Global Rate Limit - see src/services/heliusRateLimiter.js
+
 async function rateLimitedFetch(url, options = {}) {
-    // SECURITY: Check circuit breaker before making request
+    // P4: GLOBAL RATE LIMIT - Check Redis sliding window first
+    await waitForGlobalRateLimit();
+
+    // Check circuit breaker before making request
     if (!checkCircuitBreaker()) {
         throw new Error('Circuit breaker is open - API temporarily unavailable');
     }

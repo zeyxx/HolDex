@@ -7,7 +7,7 @@ const rateLimit = require('express-rate-limit');
 const compression = require('compression'); 
 const config = require('./config/env');
 const logger = require('./services/logger');
-const { initDB, getDB } = require('./services/database');
+const { initDB, getDB, preloadKnownMintsCache } = require('./services/database');
 const { connectRedis } = require('./services/redis');
 const { startSnapshotter } = require('./indexer/tasks/snapshotter');
 const _kScoreUpdater = require('./tasks/kScoreUpdater');
@@ -449,6 +449,9 @@ async function startServer() {
         
         await initDB();
         await connectRedis();
+
+        // Preload known mints to Redis cache (reduces DB load during webhook bursts)
+        await preloadKnownMintsCache();
 
         // Start Token Queue Processor (rate-limited token indexing)
         const { startQueueProcessor } = require('./services/tokenQueue');

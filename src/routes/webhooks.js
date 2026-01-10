@@ -18,6 +18,7 @@ const verification = require('../services/verificationService');
 const newTokenWebhook = require('../services/newTokenWebhook');
 const { queueNewToken, promoteToQueue } = require('../services/tokenQueue');
 const signalAccumulator = require('../services/signalAccumulator');
+const { tokenExists } = require('../services/database');
 // DISABLED: Direct indexing causes rate limit floods
 // const { indexTokenOnChain } = require('../services/indexer');
 
@@ -595,38 +596,10 @@ function init(deps) {
                         // Validate address
                         if (!isValidSolanaAddress(mint)) continue;
 
-                        // OPTIMIZATION: Use Redis for fast existence check (avoids DB connection exhaustion)
-                        // Redis check is ~100x faster than DB query under load
-                        let exists = false;
-                        if (redis) {
-                            try {
-                                // Check Redis cache first (set of known mints)
-                                exists = await redis.sismember('known_mints', mint);
-                            } catch (_redisErr) {
-                                // Redis failed - fall through to DB check
-                            }
-                        }
-
-                        // Only hit DB if Redis says mint is unknown (or Redis unavailable)
-                        if (!exists) {
-                            try {
-                                const dbResult = await db.get(
-                                    'SELECT mint FROM tokens WHERE mint = $1',
-                                    [mint]
-                                );
-                                exists = !!dbResult;
-                                // Cache the result in Redis for future checks
-                                if (exists && redis) {
-                                    redis.sadd('known_mints', mint).catch(() => {});
-                                }
-                            } catch (dbErr) {
-                                // DB error - skip this mint but don't fail batch
-                                logger.warn(`[NewToken] DB check failed for ${mint.slice(0, 8)}: ${dbErr.message}`);
-                                stats.errors++;
-                                continue;
-                            }
-                        }
-
+                        // OPTIMIZATION: Use centralized tokenExists with Redis-first caching
+                        // Includes positive cache (known mints) and negative cache (unknown mints with TTL)
+                        // This avoids DB connection exhaustion during high webhook volume
+                        const exists = await tokenExists(mint);
                         if (exists) {
                             skipped++;
                             continue;

@@ -17,7 +17,7 @@
  */
 
 const { getClient } = require('./redis');
-const { getDB } = require('./database');
+const { getDB, tokenExists, cacheKnownToken } = require('./database');
 const { fetchTokenMetadata } = require('../utils/metaplex');
 const { getSolanaConnection } = require('./solana');
 const { PublicKey } = require('@solana/web3.js');
@@ -123,9 +123,9 @@ async function promoteToQueue(mint, trigger = 'swap', options = {}) {
         }
 
         // DB check: Skip if caller already verified (e.g., webhook already checked)
-        // This optimization saves ~1 DB query per webhook event
+        // Uses Redis-cached tokenExists for performance
         if (!options.skipDbCheck) {
-            const inDb = await getDB().get('SELECT mint FROM tokens WHERE mint = $1', [mint]);
+            const inDb = await tokenExists(mint);
             if (inDb) {
                 // Exists in DB - clean up pending if present
                 if (inPending) {
@@ -284,6 +284,9 @@ async function processToken(mint) {
                 decimals = COALESCE(EXCLUDED.decimals, tokens.decimals),
                 updated_at = NOW()
         `, [mint, meta.name, meta.symbol, meta.image, supply, decimals, Date.now()]);
+
+        // Add to Redis known mints cache (invalidates negative cache)
+        await cacheKnownToken(mint);
 
         // Cleanup queue data
         await redis.srem(PROCESSING_KEY, mint);

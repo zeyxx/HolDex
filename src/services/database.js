@@ -1216,6 +1216,124 @@ async function markWatchlistAlertNotified(id) {
     await db.run('UPDATE user_watchlists SET last_notified_at = $1 WHERE id = $2', [Date.now(), id]);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// REDIS-CACHED TOKEN EXISTENCE CHECKS
+// Reduces DB load during high webhook volume by caching known mints in Redis
+// ════════════════════════════════════════════════════════════════════════════
+
+const KNOWN_MINTS_KEY = 'holdex:known_mints';
+const UNKNOWN_MINTS_KEY = 'holdex:unknown_mints'; // Negative cache to avoid repeated DB misses
+const UNKNOWN_MINT_TTL = 300; // 5 minutes TTL for negative cache
+
+/**
+ * Check if a token exists - Redis-first, DB fallback
+ * @param {string} mint - Token mint address
+ * @returns {Promise<boolean>} - true if token exists
+ */
+async function tokenExists(mint) {
+    const redis = getClient();
+
+    // Redis-first: Check positive cache
+    if (redis) {
+        try {
+            const inCache = await redis.sismember(KNOWN_MINTS_KEY, mint);
+            if (inCache) return true;
+
+            // Check negative cache (recently checked, not found)
+            const inNegativeCache = await redis.sismember(UNKNOWN_MINTS_KEY, mint);
+            if (inNegativeCache) return false;
+        } catch (_e) {
+            // Redis error - fall through to DB
+        }
+    }
+
+    // DB fallback
+    const db = getDB();
+    if (!db) return false;
+
+    try {
+        const result = await db.get('SELECT mint FROM tokens WHERE mint = $1', [mint]);
+        const exists = !!result;
+
+        // Cache the result in Redis
+        if (redis) {
+            if (exists) {
+                redis.sadd(KNOWN_MINTS_KEY, mint).catch(() => {});
+            } else {
+                // Negative cache with TTL to avoid repeated misses
+                redis.sadd(UNKNOWN_MINTS_KEY, mint).catch(() => {});
+                redis.expire(UNKNOWN_MINTS_KEY, UNKNOWN_MINT_TTL).catch(() => {});
+            }
+        }
+
+        return exists;
+    } catch (_e) {
+        // DB error - assume doesn't exist to allow retry
+        return false;
+    }
+}
+
+/**
+ * Add a token to the known mints cache (call after successful insert)
+ * @param {string} mint - Token mint address
+ */
+async function cacheKnownToken(mint) {
+    const redis = getClient();
+    if (!redis) return;
+
+    try {
+        await redis.sadd(KNOWN_MINTS_KEY, mint);
+        // Remove from negative cache if present
+        await redis.srem(UNKNOWN_MINTS_KEY, mint);
+    } catch (_e) {
+        // Ignore Redis errors - cache is optional
+    }
+}
+
+/**
+ * Bulk add tokens to known mints cache
+ * @param {string[]} mints - Array of token mint addresses
+ */
+async function cacheKnownTokens(mints) {
+    const redis = getClient();
+    if (!redis || mints.length === 0) return;
+
+    try {
+        await redis.sadd(KNOWN_MINTS_KEY, ...mints);
+        // Remove from negative cache
+        await redis.srem(UNKNOWN_MINTS_KEY, ...mints);
+    } catch (_e) {
+        // Ignore Redis errors
+    }
+}
+
+/**
+ * Preload known mints cache from DB (call on startup)
+ * @returns {Promise<number>} - Number of mints cached
+ */
+async function preloadKnownMintsCache() {
+    const db = getDB();
+    const redis = getClient();
+    if (!db || !redis) return 0;
+
+    try {
+        const mints = await db.all('SELECT mint FROM tokens');
+        if (mints.length > 0) {
+            const mintAddresses = mints.map(m => m.mint);
+            // Batch add in chunks of 1000 to avoid Redis command limits
+            for (let i = 0; i < mintAddresses.length; i += 1000) {
+                const chunk = mintAddresses.slice(i, i + 1000);
+                await redis.sadd(KNOWN_MINTS_KEY, ...chunk);
+            }
+            logger.info(`🚀 Preloaded ${mints.length} known mints to Redis cache`);
+        }
+        return mints.length;
+    } catch (e) {
+        logger.warn(`⚠️ Failed to preload known mints cache: ${e.message}`);
+        return 0;
+    }
+}
+
 module.exports = {
     initDB,
     getDB,
@@ -1228,5 +1346,10 @@ module.exports = {
     removeFromWatchlist,
     updateWatchlistItem,
     getWatchlistAlerts,
-    markWatchlistAlertNotified
+    markWatchlistAlertNotified,
+    // Redis-cached token existence
+    tokenExists,
+    cacheKnownToken,
+    cacheKnownTokens,
+    preloadKnownMintsCache
 };

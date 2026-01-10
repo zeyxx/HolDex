@@ -15,18 +15,19 @@
 
 ## ⏳ À FAIRE (Prochaine session)
 
-### P4: Global Helius Rate Limit
+### ✅ P4: Global Helius Rate Limit (DONE)
 ```
-Fichier: src/services/solana.js (ou nouveau middleware)
-Action: Redis counter 50 req/s max pour TOUS les appels Helius
-Pattern: Leaky bucket ou sliding window
+Fichier: src/services/heliusRateLimiter.js (nouveau)
+Action: Redis sliding window 50 req/s global
+Appliqué à: rateLimitedFetch(), solana.js Helius calls
 ```
 
-### P5: Désactiver Auto-Index sur Search Public
+### ✅ P5: Désactiver Auto-Index sur Search Public (DONE)
 ```
-Fichier: src/routes/tokens.js:2546
-Action: Commenter ou conditionner indexNewToken() sur recherche publique
-Raison: Chaque search "unknown token" déclenche indexation = ~50 RPC
+Fichier: src/routes/tokens.js:2538, 2565
+Env var: DISABLE_AUTO_INDEX=true
+Action: Skip indexTokenOnChain() et GeckoTerminal backfill
+Économie: ~50 RPC par recherche unknown token
 ```
 
 ### P6: Cache Agressif priceProvider.js

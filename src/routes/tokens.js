@@ -2533,7 +2533,9 @@ function init(deps) {
                 if (isAddress) {
                     // Contract address search - index if not found
                     rows = await db.all(`SELECT ${selectFields} FROM tokens WHERE mint = $1`, [search]);
-                    if (rows.length === 0) {
+                    // P5: DISABLE_AUTO_INDEX - skip auto-indexing to save RPC credits
+                    // Only index when token explicitly requested via /api/token/:mint
+                    if (rows.length === 0 && process.env.DISABLE_AUTO_INDEX !== 'true') {
                         // Rate limit indexing to prevent RPC abuse
                         const clientIp = req.headers['x-forwarded-for'] || req.ip || 'unknown';
                         const rateCheck = await checkIndexingRateLimit(clientIp);
@@ -2550,6 +2552,8 @@ function init(deps) {
                                 rows = [];
                             }
                         }
+                    } else if (rows.length === 0) {
+                        logger.debug(`[PublicSearch] Auto-index disabled, token ${search.slice(0,8)} not found`);
                     }
                 } else {
                     // SECURITY: Escape LIKE pattern to prevent injection (M9)
@@ -2557,7 +2561,8 @@ function init(deps) {
                     rows = await db.all(`SELECT ${selectFields} FROM tokens WHERE (symbol ILIKE $1 OR name ILIKE $1) ORDER BY volume24h DESC NULLS LAST LIMIT $2`, [safeSearch, limit]);
 
                     // Backfill from GeckoTerminal if not enough results
-                    if (rows.length < MIN_RESULTS && search.length >= 2) {
+                    // P5: Skip backfill when auto-index is disabled
+                    if (rows.length < MIN_RESULTS && search.length >= 2 && process.env.DISABLE_AUTO_INDEX !== 'true') {
                         try {
                             const existingMints = new Set(rows.map(r => r.mint));
                             const needed = MIN_RESULTS - rows.length;

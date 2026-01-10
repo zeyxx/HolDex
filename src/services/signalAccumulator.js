@@ -452,8 +452,27 @@ class SignalAccumulator {
                 return { data, judgment: null }; // Already judged, just accumulate signals
             }
 
+            // ATOMIC LOCK: Prevent concurrent judgments using Redis SETNX
+            // This fixes the race condition where multiple webhook events try to judge simultaneously
+            const judgmentLockKey = `holdex:judgment:lock:${mint}`;
+            const acquired = await redis.set(judgmentLockKey, '1', 'EX', 60, 'NX'); // 60s TTL
+
+            if (!acquired) {
+                // Another process is judging this token right now - skip to prevent duplicates
+                return { data, judgment: null };
+            }
+
             // Check if ready for judgment
-            const judgment = await this.tryJudge(mint, data);
+            let judgment = null;
+            try {
+                judgment = await this.tryJudge(mint, data);
+            } finally {
+                // If not a final judgment (ACCEPT/REJECT), release lock for future attempts
+                // If final, keep lock to prevent re-processing (will expire in 60s anyway)
+                if (!judgment || (judgment.status !== 'accepted' && judgment.status !== 'rejected')) {
+                    await redis.del(judgmentLockKey);
+                }
+            }
 
             return { data, judgment };
 

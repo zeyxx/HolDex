@@ -223,12 +223,18 @@ function getSolanaConnection(forceNew = false) {
 /**
  * Get raw (untracked) connection for special cases
  *
- * Use sparingly - only for WebSocket subscriptions or cases where
- * credit tracking would cause issues. Most code should use getSolanaConnection().
+ * SECURITY WARNING: This connection bypasses credit tracking!
+ * Only use for WebSocket subscriptions where tracking is impossible.
+ * All other code MUST use getSolanaConnection() for HARDCAP tracking.
  *
  * @returns {Connection} Raw untracked connection
+ * @deprecated Prefer getSolanaConnection() for all RPC calls
  */
 function getRawConnection() {
+    // SECURITY: Log warning when raw connection is accessed (for audit trail)
+    const caller = new Error().stack?.split('\n')[2]?.trim() || 'unknown';
+    logger.warn(`⚠️  [SECURITY] getRawConnection() called - bypasses credit tracking! Caller: ${caller.slice(0, 100)}`);
+
     if (!connection) {
         connection = createConnection();
         trackedConnection = createTrackedConnection(connection);

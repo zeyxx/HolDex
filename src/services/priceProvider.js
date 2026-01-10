@@ -18,14 +18,17 @@ const { getRedis: _getRedis } = require('./redis');
 // CONFIGURATION
 // ============================================
 
-// Jupiter Price API - uses lite-api.jup.ag (free, no key required)
-// Lite tier: 60 requests per 60 seconds (1 req/sec average)
-// For higher limits, get API key at: https://portal.jup.ag/
+// Jupiter Price API - requires API key from https://portal.jup.ag/
+// Pro tier: 600 requests per 10 seconds
+// JUPITER_API_KEY must be set in environment
 const JUPITER_API_KEY = config.JUPITER_API_KEY || process.env.JUPITER_API_KEY;
-const JUPITER_PRICE_URL = JUPITER_API_KEY
-    ? 'https://api.jup.ag/price/v2'      // Pro tier with API key
-    : 'https://lite-api.jup.ag/price/v2'; // Free tier, no key needed
+const JUPITER_PRICE_URL = 'https://api.jup.ag/price/v2';
 const JUPITER_BATCH_SIZE = 100; // Jupiter allows up to 100 tokens per request
+
+// Warn if no API key (Jupiter requires it now)
+if (!JUPITER_API_KEY) {
+    logger.warn('[PriceProvider] JUPITER_API_KEY not set - prices will fail. Get key at https://portal.jup.ag/');
+}
 
 // Helius RPC for on-chain data
 const HELIUS_RPC_URL = 'https://mainnet.helius-rpc.com';

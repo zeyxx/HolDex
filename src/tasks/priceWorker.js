@@ -26,7 +26,8 @@ const TIERS = {
 };
 
 // Batch size limit (Jupiter allows 100)
-const BATCH_SIZE = 30; // Keep at 30 to match Raydium rate limits
+// Raydium is fetched in parallel with concurrency limit inside priceProvider
+const BATCH_SIZE = 100;
 
 /**
  * Main price update cycle

@@ -56,7 +56,7 @@ async function checkIndexingRateLimit(ip) {
     }
 }
 const { smartCache, aggregateAndSaveToken } = require('../services/database');
-const { getSolanaConnection } = require('../services/solana'); 
+const { getSolanaConnection, getRPCProvider } = require('../services/solana');
 const config = require('../config/env');
 const { updateSingleToken, updateKScores, getHealthStatus } = require('../tasks/kScoreUpdater'); 
 const { getClient } = require('../services/redis'); 
@@ -436,7 +436,7 @@ function init(deps) {
 
     /**
      * GET /api/rpc-status
-     * Show RPC provider health for transparency
+     * Show RPC provider health for transparency (legacy)
      * SECURITY: Rate limited (M2)
      */
     router.get('/rpc-status', cacheControl(30, 60), proxyRateLimit, (req, res) => {
@@ -453,6 +453,59 @@ function init(deps) {
             healthyCount: providers.filter(p => p.healthy).length,
             totalCount: providers.length
         });
+    });
+
+    /**
+     * GET /api/health/rpc
+     * L2 Multi-RPC Provider health status
+     * Shows provider health, capabilities, and failover status
+     */
+    router.get('/health/rpc', cacheControl(10, 30), proxyRateLimit, async (req, res) => {
+        try {
+            const provider = getRPCProvider();
+
+            // Get health summary from L2 provider
+            const healthSummary = await provider.getHealthSummary();
+            const capabilities = provider.getCapabilities();
+
+            // Determine overall status
+            const healthyCount = Object.values(healthSummary).filter(s => s.status === 'healthy').length;
+            const degradedCount = Object.values(healthSummary).filter(s => s.status === 'degraded').length;
+            const unhealthyCount = Object.values(healthSummary).filter(s => s.status === 'unhealthy').length;
+            const totalCount = Object.keys(healthSummary).length;
+
+            let overallStatus = 'healthy';
+            if (unhealthyCount === totalCount) {
+                overallStatus = 'critical';
+            } else if (healthyCount === 0) {
+                overallStatus = 'degraded';
+            } else if (degradedCount > 0 || unhealthyCount > 0) {
+                overallStatus = 'partial';
+            }
+
+            res.json({
+                success: true,
+                status: overallStatus,
+                timestamp: new Date().toISOString(),
+                providers: healthSummary,
+                summary: {
+                    healthy: healthyCount,
+                    degraded: degradedCount,
+                    unhealthy: unhealthyCount,
+                    total: totalCount
+                },
+                capabilities,
+                priority: provider.priority,
+                hasHelius: provider.hasHelius()
+            });
+        } catch (e) {
+            logger.error(`[RPC Health] Check failed: ${e.message}`);
+            res.status(500).json({
+                success: false,
+                error: 'RPC health check failed',
+                message: e.message
+            });
+        }
     });
 
     // PUBLIC: Candle Chart

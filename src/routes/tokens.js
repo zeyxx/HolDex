@@ -1992,13 +1992,16 @@ function init(deps) {
             });
         }
 
-        // SECURITY: Block dangerous patterns
-        const dangerous = ['drop', 'delete', 'update', 'insert', 'alter', 'truncate', 'create', 'grant', 'revoke'];
-        for (const pattern of dangerous) {
-            if (normalized.includes(pattern)) {
+        // SECURITY: Block dangerous SQL commands (word boundary matching to allow column names like updated_at)
+        const dangerousCommands = [
+            /\bdrop\b/, /\bdelete\b/, /\bupdate\s+\w+\s+set\b/, /\binsert\b/,
+            /\balter\b/, /\btruncate\b/, /\bcreate\b/, /\bgrant\b/, /\brevoke\b/
+        ];
+        for (const pattern of dangerousCommands) {
+            if (pattern.test(normalized)) {
                 return res.status(403).json({
                     success: false,
-                    error: `Forbidden pattern: ${pattern}`
+                    error: `Forbidden SQL command detected`
                 });
             }
         }

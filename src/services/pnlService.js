@@ -18,6 +18,7 @@ const config = require('../config/env');
 const { getSolPrice } = require('./priceService');
 const logger = require('./logger');
 const { getClient: getRedisClient } = require('./redis');
+const { consumeCredits } = require('./rpcHardcap');
 
 const HELIUS_API_KEY = config.HELIUS_API_KEY;
 
@@ -95,6 +96,9 @@ async function fetchOnChainHoldings(wallet, solPrice) {
             }),
             signal: AbortSignal.timeout(15000)
         });
+
+        // Track Helius DAS credit (10 credits for getAssetsByOwner)
+        consumeCredits('helius:getAssetsByOwner', 10).catch(() => {});
 
         if (!response.ok) {
             logger.warn(`[PnL] Helius DAS API error: ${response.status}`);
@@ -259,6 +263,9 @@ async function fetchPoolReservePrices(mints) {
             signal: AbortSignal.timeout(15000)
         });
 
+        // Track batch RPC credits (1 credit per getTokenLargestAccounts call)
+        consumeCredits('helius:getTokenLargestAccounts:batch', mints.length).catch(() => {});
+
         if (!laResp.ok) return priceMap;
         const laResults = await laResp.json();
 
@@ -297,6 +304,9 @@ async function fetchPoolReservePrices(mints) {
             signal: AbortSignal.timeout(15000)
         });
 
+        // Track batch RPC credits (1 credit per getAccountInfo call)
+        consumeCredits('helius:getAccountInfo:batch', accountsToQuery.length).catch(() => {});
+
         if (!infoResp.ok) return priceMap;
         const infoResults = await infoResp.json();
 
@@ -331,6 +341,9 @@ async function fetchPoolReservePrices(mints) {
             body: JSON.stringify(balReqs),
             signal: AbortSignal.timeout(15000)
         });
+
+        // Track batch RPC credits (1 credit per getBalance call)
+        consumeCredits('helius:getBalance:batch', ownerList.length).catch(() => {});
 
         if (!balResp.ok) return priceMap;
         const balResults = await balResp.json();
@@ -409,6 +422,9 @@ async function fetchSwapTransactions(wallet, options = {}) {
                 method: 'GET',
                 signal: AbortSignal.timeout(15000)
             });
+
+            // Track Enhanced Transactions API credits (100 credits per page!)
+            consumeCredits('helius:getEnhancedTransactions', 100).catch(() => {});
 
             if (!response.ok) {
                 logger.warn(`[PnL] Helius API error: ${response.status}`);

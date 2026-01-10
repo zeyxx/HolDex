@@ -2,6 +2,7 @@ const axios = require('axios');
 const { PublicKey } = require('@solana/web3.js');
 const { getSolanaConnection } = require('../services/solana');
 const config = require('../config/env');
+const { consumeCredits } = require('../services/rpcHardcap');
 
 const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
 
@@ -72,6 +73,9 @@ async function fetchTokenMetadata(mintAddress) {
                 },
                 { timeout: 5000 }
             );
+
+            // Track Helius DAS credit (5 credits per getAsset call)
+            consumeCredits('helius:getAsset', 5).catch(() => {});
 
             if (heliusRes.data?.result) {
                 const asset = heliusRes.data.result;

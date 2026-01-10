@@ -10,6 +10,7 @@
  */
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const logger = require('../services/logger');
 const config = require('../config/env');
 const { getClient } = require('../services/redis');
@@ -19,6 +20,40 @@ const newTokenWebhook = require('../services/newTokenWebhook');
 const { queueNewToken, promoteToQueue } = require('../services/tokenQueue');
 const signalAccumulator = require('../services/signalAccumulator');
 const { tokenExists } = require('../services/database');
+
+// ============================================
+// RATE LIMITING - Prevent webhook amplification attacks
+// ============================================
+
+/**
+ * Webhook Rate Limiter
+ *
+ * Limits: 100 requests per minute per IP
+ * Purpose: Prevent amplification attacks (1 webhook → N RPC calls)
+ *
+ * IMPORTANT: This is the FIRST line of defense against credit drain.
+ * Even legitimate Helius webhooks can flood if misconfigured.
+ */
+const webhookRateLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute window
+    max: 100,            // 100 requests per minute per IP
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: false, // Count ALL requests
+    keyGenerator: (req) => {
+        // Trust X-Forwarded-For from Helius (behind their load balancer)
+        return req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+               req.ip ||
+               'unknown';
+    },
+    handler: (req, res) => {
+        logger.warn(`⚠️  Webhook rate limit exceeded: ${req.ip}`);
+        res.status(429).json({
+            error: 'Too many webhook requests',
+            retryAfter: 60
+        });
+    }
+});
 // DISABLED: Direct indexing causes rate limit floods
 // const { indexTokenOnChain } = require('../services/indexer');
 
@@ -269,7 +304,7 @@ function init(deps) {
      *   timestamp: 1234567890
      * }]
      */
-    router.post('/transfers', async (req, res) => {
+    router.post('/transfers', webhookRateLimiter, async (req, res) => {
         try {
             // ============================================
             // SECURITY: Auth Header Verification
@@ -521,7 +556,7 @@ function init(deps) {
      *   - TOKEN_MINT (SPL token creation)
      *   - SWAP (First Pump.fun swap)
      */
-    router.post('/new-tokens', async (req, res) => {
+    router.post('/new-tokens', webhookRateLimiter, async (req, res) => {
         const stats = newTokenWebhook.getStats();
         stats.eventsReceived++;
         stats.lastEventTime = Date.now();

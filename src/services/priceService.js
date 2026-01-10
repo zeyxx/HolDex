@@ -5,8 +5,10 @@
  * - Token/USD = Token/SOL × SOL/USD
  */
 const axios = require('axios');
-const { Connection, PublicKey } = require('@solana/web3.js');
+const { PublicKey } = require('@solana/web3.js');
 const config = require('../config/env');
+const { getSolanaConnection } = require('./solana');
+const { consumeCredits } = require('./rpcHardcap');
 
 const HELIUS_API_KEY = config.HELIUS_API_KEY;
 const HELIUS_RPC_URL = 'https://mainnet.helius-rpc.com/';
@@ -16,11 +18,8 @@ const HELIUS_HEADERS = HELIUS_API_KEY
     ? { 'Content-Type': 'application/json', 'Authorization': `Bearer ${HELIUS_API_KEY}` }
     : { 'Content-Type': 'application/json' };
 
-// Security: Use public RPC for Connection (no API key exposure in URL)
-// Helius JSON-RPC calls use header auth via axios instead
-const connection = new Connection(
-    config.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com'
-);
+// Use TrackedConnection from solana.js for automatic credit tracking
+const getConnection = () => getSolanaConnection();
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -78,7 +77,7 @@ async function getSolPrice() {
 async function getTokenAccountBalance(vaultAddress) {
     try {
         const pubkey = new PublicKey(vaultAddress);
-        const info = await connection.getAccountInfo(pubkey);
+        const info = await getConnection().getAccountInfo(pubkey);
         if (!info || info.data.length < 72) return null;
 
         // SPL Token account layout: amount at offset 64 (8 bytes)
@@ -228,6 +227,9 @@ async function getPoolVaults(poolAddress, _dex) {
             method: 'getAsset',
             params: { id: poolAddress }
         }, { headers: HELIUS_HEADERS, timeout: 5000 });
+
+        // Track Helius DAS credit (5 credits per getAsset call)
+        consumeCredits('helius:getAsset', 5).catch(() => {});
 
         // Most AMM pools store vault info in content.metadata
         const content = response.data?.result?.content;

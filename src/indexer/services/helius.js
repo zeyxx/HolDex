@@ -1,42 +1,26 @@
-const { Connection } = require('@solana/web3.js');
-const config = require('../../config/env');
+/**
+ * Indexer Helius Connection
+ *
+ * Uses the shared TrackedConnection from solana.js for automatic credit tracking.
+ * All RPC calls through this connection are tracked via the HARDCAP system.
+ *
+ * SECURITY NOTE: API keys are handled securely in the parent module.
+ */
+const { getSolanaConnection } = require('../../services/solana');
 const logger = require('../../services/logger');
 
-let connection = null;
+let initialized = false;
 
 /**
  * Get Solana RPC connection for indexer
- *
- * SECURITY NOTE: @solana/web3.js Connection class doesn't support custom headers
- * for RPC authentication. The API key must be in the URL query string.
- * This is a limitation of the library, not our design choice.
- *
- * For WebSocket connections, custom headers aren't supported by the protocol
- * during handshake, so API key in URL is standard practice.
+ * Uses TrackedConnection for automatic credit tracking via HARDCAP
  */
 function getConnection() {
-    if (!connection) {
-        // Use Helius API key if available for higher limits/reliability
-        const rpcUrl = config.HELIUS_API_KEY
-            ? `https://mainnet.helius-rpc.com/?api-key=${config.HELIUS_API_KEY}`
-            : config.SOLANA_RPC_URL;
-
-        // Construct WebSocket URL correctly
-        const wsUrl = config.HELIUS_API_KEY
-            ? `wss://mainnet.helius-rpc.com/?api-key=${config.HELIUS_API_KEY}`
-            : rpcUrl.replace('http', 'ws');
-
-        // Log masked URLs (never expose API key in logs)
-        const maskedRpc = rpcUrl.replace(/api-key=[^&]+/, 'api-key=***');
-        logger.info(`🔌 Indexer RPC: ${maskedRpc}`);
-
-        connection = new Connection(rpcUrl, {
-            commitment: 'confirmed',
-            wsEndpoint: wsUrl,
-            disableRetryOnRateLimit: false
-        });
+    if (!initialized) {
+        logger.info(`🔌 Indexer using TrackedConnection (HARDCAP enabled)`);
+        initialized = true;
     }
-    return connection;
+    return getSolanaConnection();
 }
 
 module.exports = { getConnection };

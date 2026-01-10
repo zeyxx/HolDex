@@ -327,6 +327,9 @@ async function consumeCredits(method, credits = null, nodeType = CURRENT_NODE_TY
             await redis.set(keys.blocked, '1', 'EX', 3600);
         }
 
+        // Check circuit breaker (triggers at 80%)
+        checkCircuitBreaker(hourlyPercent, nodeType);
+
         // Log at thresholds
         if (maxPercent >= budget.criticalThreshold) {
             logger.warn(`[HARDCAP] ${nodeType} CRITICAL: ${Math.round(maxPercent * 100)}% of budget`);
@@ -352,8 +355,71 @@ async function consumeCredits(method, credits = null, nodeType = CURRENT_NODE_TY
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CIRCUIT BREAKER - Hard stop at 80% (configurable)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CIRCUIT_BREAKER_THRESHOLD = 0.80; // 80% of budget triggers circuit breaker
+
+/**
+ * Circuit Breaker State
+ *
+ * When usage exceeds 80%, circuit breaker OPENS:
+ * - All non-critical RPC calls are BLOCKED
+ * - Only critical methods (getAccountInfo, getTokenSupply) allowed
+ * - Breaker resets at hourly boundary
+ */
+const circuitBreakerState = {
+    isOpen: false,
+    openedAt: 0,
+    reason: null,
+    usage: 0
+};
+
+// Critical methods that bypass circuit breaker (essential for user-facing API)
+const CRITICAL_RPC_METHODS = new Set([
+    'getAccountInfo',
+    'getTokenSupply',
+    'getBalance',
+    'getLatestBlockhash'
+]);
+
+/**
+ * Check if circuit breaker should trip
+ * Called after each credit consumption
+ */
+function checkCircuitBreaker(hourlyPercent, nodeType) {
+    const budget = NODE_BUDGETS[nodeType];
+
+    // Only blockable nodes have circuit breaker
+    if (!budget.canBlock) return;
+
+    const shouldOpen = hourlyPercent >= CIRCUIT_BREAKER_THRESHOLD;
+
+    if (shouldOpen && !circuitBreakerState.isOpen) {
+        circuitBreakerState.isOpen = true;
+        circuitBreakerState.openedAt = Date.now();
+        circuitBreakerState.reason = `Usage at ${Math.round(hourlyPercent * 100)}%`;
+        circuitBreakerState.usage = hourlyPercent;
+        logger.warn(`⚡ [CIRCUIT BREAKER] OPENED for ${nodeType} at ${Math.round(hourlyPercent * 100)}% - non-critical RPC blocked`);
+    }
+
+    // Reset at hourly boundary
+    if (circuitBreakerState.isOpen) {
+        const now = new Date();
+        const openedDate = new Date(circuitBreakerState.openedAt);
+        if (now.getHours() !== openedDate.getHours()) {
+            circuitBreakerState.isOpen = false;
+            circuitBreakerState.reason = null;
+            logger.info(`⚡ [CIRCUIT BREAKER] Reset at hourly boundary for ${nodeType}`);
+        }
+    }
+}
+
 /**
  * Gate function - check HARDCAP before making RPC call
+ *
+ * NEW: Circuit breaker at 80% blocks non-critical calls
  *
  * Usage:
  *   const gate = await rpcGate('getTokenAccounts');
@@ -369,7 +435,30 @@ async function consumeCredits(method, credits = null, nodeType = CURRENT_NODE_TY
  */
 async function rpcGate(method, nodeType = CURRENT_NODE_TYPE) {
     const cost = getCreditCost(method);
+    const budget = NODE_BUDGETS[nodeType];
     const status = await checkHardcap(nodeType);
+
+    // Check circuit breaker first (faster than Redis check)
+    if (circuitBreakerState.isOpen && budget?.canBlock) {
+        const isCritical = CRITICAL_RPC_METHODS.has(method);
+
+        if (!isCritical) {
+            return {
+                allowed: false,
+                reason: 'CIRCUIT_BREAKER_OPEN',
+                throttleMs: 60000, // 1 minute wait
+                cost,
+                method,
+                circuitBreaker: {
+                    isOpen: true,
+                    openedAt: circuitBreakerState.openedAt,
+                    reason: circuitBreakerState.reason
+                },
+                ...status
+            };
+        }
+        // Critical methods bypass circuit breaker
+    }
 
     if (!status.allowed) {
         return {
@@ -530,6 +619,11 @@ module.exports = {
     checkHardcap,
     consumeCredits,
     rpcGate,
+
+    // Circuit breaker
+    CIRCUIT_BREAKER_THRESHOLD,
+    circuitBreakerState,
+    CRITICAL_RPC_METHODS,
 
     // Status and monitoring
     getAllNodeStatus,

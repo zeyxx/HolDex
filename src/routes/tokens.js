@@ -1844,6 +1844,80 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/purge-stale-queue
+     * Purge tokens from queue that have been waiting too long (likely dead/spam)
+     */
+    router.post('/admin/purge-stale-queue', requireAdmin, async (req, res) => {
+        const { getClient } = require('../services/redis');
+        const redis = getClient();
+
+        if (!redis) {
+            return res.status(503).json({ success: false, error: 'Redis not available' });
+        }
+
+        try {
+            const maxAgeMs = parseInt(req.query.maxAge) || 3600000; // Default 1 hour
+            const now = Date.now();
+            let purged = 0;
+            let kept = 0;
+            let noData = 0;
+
+            // Get all queued tokens
+            const queuedTokens = await redis.smembers('holdex:new_token_queue');
+            logger.info(`[Purge] Analyzing ${queuedTokens.length} queued tokens...`);
+
+            for (const mint of queuedTokens) {
+                const rawData = await redis.hget('holdex:queue_data', mint);
+
+                if (!rawData) {
+                    // No queue data - remove orphan
+                    await redis.srem('holdex:new_token_queue', mint);
+                    noData++;
+                    continue;
+                }
+
+                const data = JSON.parse(rawData);
+                const age = now - (data.queuedAt || 0);
+
+                if (age > maxAgeMs) {
+                    // Too old - purge
+                    await redis.srem('holdex:new_token_queue', mint);
+                    await redis.hdel('holdex:queue_data', mint);
+                    purged++;
+                } else {
+                    kept++;
+                }
+            }
+
+            // Also clean failed queue
+            const failedTokens = await redis.smembers('holdex:failed_tokens');
+            let failedPurged = 0;
+            for (const mint of failedTokens) {
+                await redis.srem('holdex:failed_tokens', mint);
+                await redis.hdel('holdex:queue_data', mint);
+                failedPurged++;
+            }
+
+            logger.info(`[Purge] ✅ Purged ${purged} stale, ${noData} orphans, ${failedPurged} failed. Kept ${kept} recent.`);
+
+            res.json({
+                success: true,
+                purged: purged + noData + failedPurged,
+                kept,
+                details: {
+                    stale: purged,
+                    orphans: noData,
+                    failed: failedPurged
+                },
+                maxAgeMs
+            });
+        } catch (e) {
+            logger.error(`[Purge] Error: ${e.message}`);
+            res.status(500).json({ success: false, error: e.message });
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

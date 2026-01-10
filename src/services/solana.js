@@ -2,7 +2,6 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 const config = require('../config/env');
 const logger = require('./logger');
 const { getRedis } = require('./redis');
-const rpcMonitor = require('./rpcMonitor');
 const { getRPCProvider, getConnection } = require('./rpcProvider');
 
 let connection = null;
@@ -180,8 +179,7 @@ async function getHolderCountFromRPC(mintAddress) {
                     cursor
                 });
 
-                // Track RPC call for monitoring
-                rpcMonitor.trackRpcCall('getTokenAccounts', 1, { mint: cleanMint }).catch(() => {});
+                // Note: RPC tracking is now handled in helius.js provider (10 credits per call)
 
                 if (!result?.token_accounts) break;
 
@@ -248,8 +246,7 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
         // Use provider's getTokenLargestAccounts with fallback
         const largest = await provider.getTokenLargestAccounts(mintAddress);
 
-        // Track RPC call
-        rpcMonitor.trackRpcCall('getTokenLargestAccounts', 1, { mint: mintAddress }).catch(() => {});
+        // Note: RPC tracking is now handled in helius.js provider
 
         if (!largest || !largest.value || largest.value.length === 0) return { avgHoldHours: 0 };
 
@@ -267,8 +264,7 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
                 // getSignaturesForAddress is optimal for timestamp-only queries (168ms vs 1000ms+)
                 const signatures = await provider.getSignaturesForAddress(acc.address, { limit: 50 });
 
-                // Track RPC call
-                rpcMonitor.trackRpcCall('getSignaturesForAddress', 1, { address: acc.address.toString() }).catch(() => {});
+                // Note: RPC tracking handled in helius.js provider
 
                 if (signatures && signatures.length > 0) {
                     const oldestTx = signatures[signatures.length - 1];

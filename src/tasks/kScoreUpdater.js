@@ -820,8 +820,8 @@ async function heliusRpc(method, params) {
         const data = await response.json();
         if (data.error) throw new Error(data.error.message);
 
-        // Track RPC call for monitoring (fire-and-forget)
-        rpcMonitor.trackRpcCall(method, 1, { params }).catch(() => {});
+        // Track RPC call for monitoring with correct credit cost
+        rpcMonitor.trackRpcCall(method, rpcMonitor.getCreditCost(method)).catch(() => {});
 
         return data.result;
     } catch (error) {

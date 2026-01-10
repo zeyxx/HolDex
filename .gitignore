@@ -58,3 +58,4 @@ PRIVATE*.md
 
 # Serena MCP cache
 .serena/
+.mcp.json

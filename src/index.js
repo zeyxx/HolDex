@@ -23,6 +23,7 @@ const spaceRoutes = require('./routes/space');
 const nodesRoutes = require('./routes/nodes');
 const nodeService = require('./services/nodeService');
 const { getOrCreateMasterWebhook } = require('./services/heliusWebhook');
+const brainReporter = require('./services/brainReporter');
 const fs = require('fs');
 const path = require('path');
 
@@ -217,6 +218,13 @@ const limiter = rateLimit({
     validate: { keyGeneratorIpFallback: false }
 });
 app.use(limiter);
+
+// --- BRAIN METRICS TRACKING ---
+// Track requests for asdf-brain metrics reporting
+app.use((req, res, next) => {
+    brainReporter.recordRequest();
+    next();
+});
 
 // --- DYNAMIC OG META TAGS ---
 // Intercept /token/:mint requests to inject social metadata
@@ -531,6 +539,7 @@ async function startServer() {
         await nodeService.sendHeartbeat(getDB());
 
         app.use((err, req, res, _next) => {
+            brainReporter.recordError();
             logger.error(`🔥 Unhandled Server Error: ${err.message}`);
             logger.error(err.stack);
             if (!res.headersSent) {
@@ -549,6 +558,9 @@ async function startServer() {
                 type: 'info',
                 key: 'startup'
             }).catch(() => {});
+
+            // Start brain metrics reporting (asdf-brain integration)
+            brainReporter.startReporting();
         });
 
     } catch (error) {

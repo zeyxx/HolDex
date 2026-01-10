@@ -37,6 +37,7 @@ const nodeService = require('../services/nodeService');
 const signedWrites = require('../services/signedWrites');
 const nodeKeys = require('../utils/nodeKeys');
 const rpcMonitor = require('../services/rpcMonitor');
+const { recordJudgmentOutcome } = require('../services/signalAccumulator');
 
 // ============================================
 // HELIUS CONFIG
@@ -3357,6 +3358,15 @@ async function updateSingleToken(deps, mint) {
 
         // Save K-Score history snapshot (daily) for credit rating trajectory
         await saveKScoreHistory(db, mint, smoothedScore, conviction.score || 0, conviction.realHoldersCount || 0);
+
+        // φ Feedback Loop: Record K-Score outcome to signal accumulator for learning
+        // This enables the 17-dimension pre-judgment system to self-optimize thresholds
+        try {
+            const wasRug = smoothedScore < 20 || security.isRug; // Simple rug heuristic
+            await recordJudgmentOutcome(mint, smoothedScore, wasRug);
+        } catch (_feedbackErr) {
+            // Non-critical - feedback loop failure shouldn't break K-Score
+        }
 
         // Record verification by this node (for decentralized consensus)
         try {

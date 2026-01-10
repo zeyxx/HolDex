@@ -455,6 +455,11 @@ async function startServer() {
         startQueueProcessor();
         logger.info('✅ Token Queue Processor started (2s rate limit)');
 
+        // Start Signal Accumulator (17-dimension pre-judgment)
+        const { start: startSignalAccumulator, NODE_ID } = require('./services/signalAccumulator');
+        startSignalAccumulator();
+        logger.info(`✅ Signal Accumulator started (node: ${NODE_ID})`);
+
         // Start WebSocket Server
         initSocket(server, allowedOrigins);
 

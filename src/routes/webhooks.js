@@ -17,6 +17,7 @@ const { isValidSolanaAddress, sanitizeError } = require('../utils/validation');
 const verification = require('../services/verificationService');
 const newTokenWebhook = require('../services/newTokenWebhook');
 const { queueNewToken, promoteToQueue } = require('../services/tokenQueue');
+const signalAccumulator = require('../services/signalAccumulator');
 // DISABLED: Direct indexing causes rate limit floods
 // const { indexTokenOnChain } = require('../services/indexer');
 
@@ -37,6 +38,105 @@ const POOL_PROGRAMS = new Set([
     '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',  // Pump.fun bonding
     'TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM', // Pump.fun AMM
 ]);
+
+// DEX detection from program IDs (for signal accumulator relevance scoring)
+// Complete list of Solana DEX/AMM programs
+const DEX_PROGRAMS = {
+    // Raydium
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': 'Raydium',     // AMM v4
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': 'Raydium',     // CLMM
+    'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C': 'Raydium',     // CPMM
+    'routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS': 'Raydium',      // Router
+
+    // Orca
+    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc': 'Orca',         // Whirlpool
+    '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP': 'Orca',        // Legacy
+
+    // Meteora
+    'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo': 'Meteora',      // DLMM
+    'Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB': 'Meteora',    // Pools
+
+    // Pump.fun ecosystem
+    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P': 'Pump.fun',     // Bonding curve
+    'TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM': 'PumpSwap',     // AMM migration
+
+    // Jupiter
+    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': 'Jupiter',      // Aggregator v6
+    'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB': 'Jupiter',      // Aggregator v4
+
+    // Moonshot
+    'MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG': 'Moonshot',
+
+    // Phoenix
+    'PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY': 'Phoenix',
+
+    // OpenBook (ex-Serum)
+    'opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb': 'OpenBook',
+    'srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX': 'OpenBook',     // Legacy Serum
+
+    // Lifinity
+    'EewxydAPCCVuNEyrVN68PuSYdQ7wKn27V9Gjeoi8dy3S': 'Lifinity',
+
+    // GooseFX
+    'GFXsSL5sSaDfNFQUYsHekbWBW1TsFdjDYzACh62tEHxn': 'GooseFX',
+
+    // Aldrin
+    'AMM55ShdkoGRB5jVYPjWziwk8m5MpwyDgsMWHaMSQWH6': 'Aldrin',
+
+    // Saber
+    'SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ': 'Saber',
+
+    // Marinade
+    'MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD': 'Marinade',
+};
+
+/**
+ * Detect DEX source from event data
+ * @param {Object} event - Helius webhook event
+ * @returns {string|null} DEX name or null
+ */
+function detectDexSource(event) {
+    // Check account keys in the transaction
+    if (event.accountData) {
+        for (const acc of event.accountData) {
+            if (acc.account && DEX_PROGRAMS[acc.account]) {
+                return DEX_PROGRAMS[acc.account];
+            }
+        }
+    }
+
+    // Check instructions
+    if (event.instructions) {
+        for (const ix of event.instructions) {
+            if (ix.programId && DEX_PROGRAMS[ix.programId]) {
+                return DEX_PROGRAMS[ix.programId];
+            }
+        }
+    }
+
+    // Check source field from Helius
+    if (event.source) {
+        const sourceMap = {
+            'RAYDIUM': 'Raydium',
+            'ORCA': 'Orca',
+            'METEORA': 'Meteora',
+            'PUMP_FUN': 'Pump.fun',
+            'JUPITER': 'Jupiter',
+        };
+        return sourceMap[event.source] || event.source;
+    }
+
+    // Check if mint ends with 'pump' (Pump.fun token)
+    if (event.tokenTransfers) {
+        for (const transfer of event.tokenTransfers) {
+            if (transfer.mint && transfer.mint.endsWith('pump')) {
+                return 'Pump.fun';
+            }
+        }
+    }
+
+    return null;
+}
 
 // Additional known pool/program addresses
 const isPoolAddress = (address) => {
@@ -533,37 +633,77 @@ function init(deps) {
                         }
 
                         // ══════════════════════════════════════════════════════════
-                        // HYBRID C+D: Route by event type
+                        // 17-DIMENSION SIGNAL ACCUMULATOR PRE-JUDGMENT
+                        // Collect FREE webhook signals → Judge → Queue only ACCEPTED
                         // ══════════════════════════════════════════════════════════
                         const eventType = event.type || 'UNKNOWN';
 
-                        if (eventType === 'SWAP') {
-                            // SWAP detected → Promote pending token to active queue
-                            // This is the trade-triggered activation (Stage 2)
-                            try {
-                                const promoted = await promoteToQueue(mint, 'swap');
-                                if (promoted) {
-                                    logger.info(`🚀 [${source}] SWAP triggered: ${mint.slice(0, 8)} → active queue`);
-                                    stats.tokensDiscovered++;
-                                    discovered++;
-                                }
-                            } catch (promoteErr) {
-                                logger.warn(`[NewToken] Promote failed for ${mint.slice(0, 8)}: ${promoteErr.message}`);
+                        // Extract wallets from the event for signal tracking
+                        const wallets = [];
+                        if (event.tokenTransfers) {
+                            for (const transfer of event.tokenTransfers) {
+                                if (transfer.fromUserAccount) wallets.push(transfer.fromUserAccount);
+                                if (transfer.toUserAccount) wallets.push(transfer.toUserAccount);
                             }
-                        } else {
-                            // TOKEN_MINT or CREATE_POOL → Add to pending set (Stage 1)
-                            // No metadata fetch yet - wait for trade activity
-                            logger.info(`👁️ [${source}] Discovered: ${mint.slice(0, 8)} (awaiting trade)`);
-                            stats.tokensDiscovered++;
-                            discovered++;
+                        }
 
-                            try {
-                                const queued = await queueNewToken(mint, source);
-                                if (!queued) {
-                                    logger.debug(`[NewToken] ${mint.slice(0, 8)} already pending or tracked`);
+                        // Extract amount if available
+                        let amount = 0;
+                        if (event.tokenTransfers && event.tokenTransfers[0]) {
+                            amount = parseFloat(event.tokenTransfers[0].tokenAmount) || 0;
+                        }
+
+                        // Detect actual DEX source from event (for relevance scoring)
+                        const dexSource = detectDexSource(event);
+
+                        // Feed signal to accumulator (FREE - no RPC cost)
+                        try {
+                            const result = await signalAccumulator.addSignal(mint, {
+                                type: eventType,
+                                wallets,
+                                amount,
+                                source: dexSource || source  // Use detected DEX, fallback to webhook source
+                            });
+
+                            if (result && result.judgment) {
+                                const { action, preScore, reason } = result.judgment;
+
+                                if (action === 'ACCEPT') {
+                                    // Token passed 17-dimension judgment → Promote to queue
+                                    const promoted = await promoteToQueue(mint, `judgment:${preScore}`);
+                                    if (promoted) {
+                                        logger.info(`✅ [Judge] ${mint.slice(0, 8)} ACCEPTED (score: ${preScore}) → active queue`);
+                                        stats.tokensDiscovered++;
+                                        discovered++;
+                                    }
+                                } else if (action === 'REJECT') {
+                                    // Token failed judgment → Don't queue
+                                    logger.debug(`❌ [Judge] ${mint.slice(0, 8)} REJECTED: ${reason}`);
+                                } else {
+                                    // PENDING - needs more signals
+                                    logger.debug(`⏳ [Judge] ${mint.slice(0, 8)} pending: ${reason}`);
                                 }
-                            } catch (queueErr) {
-                                logger.warn(`[NewToken] Queue failed for ${mint.slice(0, 8)}: ${queueErr.message}`);
+                            }
+                        } catch (_signalErr) {
+                            // Fallback to simple SWAP-based logic if accumulator fails
+                            if (eventType === 'SWAP') {
+                                try {
+                                    const promoted = await promoteToQueue(mint, 'swap_fallback');
+                                    if (promoted) {
+                                        logger.info(`🚀 [${source}] SWAP fallback: ${mint.slice(0, 8)} → active queue`);
+                                        stats.tokensDiscovered++;
+                                        discovered++;
+                                    }
+                                } catch (promoteErr) {
+                                    logger.warn(`[NewToken] Promote failed for ${mint.slice(0, 8)}: ${promoteErr.message}`);
+                                }
+                            } else {
+                                // Fallback: queue for pending
+                                try {
+                                    await queueNewToken(mint, source);
+                                } catch (queueErr) {
+                                    logger.warn(`[NewToken] Queue failed for ${mint.slice(0, 8)}: ${queueErr.message}`);
+                                }
                             }
                         }
 

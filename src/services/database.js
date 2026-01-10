@@ -20,6 +20,11 @@ async function initDB() {
 
     initPromise = (async () => {
         try {
+            // Guard against missing DATABASE_URL
+            if (!config.DATABASE_URL) {
+                throw new Error('DATABASE_URL is required - set it in .env or environment');
+            }
+
             const isLocal = config.DATABASE_URL.includes('localhost') || config.DATABASE_URL.includes('127.0.0.1');
 
             // SECURITY: SSL Configuration (H1)

@@ -4047,43 +4047,52 @@ function start(deps) {
         logger.warn("[K-Score] No HELIUS_API_KEY - conviction analysis disabled");
     }
 
-    // OPTIMIZATION: Reduce K-Score refresh frequency to save RPC credits
-    // K-Scores only update every 12 hours (instead of 30min-1h)
-    // On-demand updates still work for new tokens and admin panel
-    const KSCORE_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
-    const DEEP_INTERVAL = 24 * 60 * 60 * 1000;   // 24h for full holder refresh
+    // ============================================================================
+    // RPC CREDIT CRISIS FIX - January 2026
+    // ============================================================================
+    // DISABLED: Bulk updateKScores() that processed ALL tokens
+    // OLD: 100 tokens × 1,600 cr × 2/day = 320,000 cr/day (UNACCEPTABLE)
+    // NEW: Queue-based only - tokens updated via webhook triggers
+    //
+    // K-Score updates now happen ONLY through:
+    // 1. Webhook events (trading activity) → listener_worker queue
+    // 2. Admin panel manual refresh → on-demand
+    // 3. Token verification → on-demand
+    // 4. Minimal staleness refresh (2 tokens/12h) → below
+    // ============================================================================
 
-    const intervalHours = KSCORE_INTERVAL / (60 * 60 * 1000);
-    logger.info(`🟢 K-Score Updater Started - Interval: ${intervalHours}h (RPC optimized)`);
+    logger.info('🟢 K-Score Updater Started - QUEUE-BASED MODE (RPC crisis fix)');
+    logger.info('   ⏸️  Bulk updates: DISABLED (was burning 320k cr/day)');
+    logger.info('   ✅ On-demand updates: ENABLED (webhook, admin, verification)');
+    logger.info('   ✅ Staleness refresh: 2 tokens max every 12h');
 
-    // Run K-Score updates every 12 hours
-    setInterval(() => updateKScores(deps), KSCORE_INTERVAL);
-
-    // Deep refresh once per day (full RPC analysis to update holder counts, burn, etc.)
-    // Runs at a different offset to avoid overlap
-    setInterval(() => {
-        logger.info('[K-Score] Starting daily deep refresh (full RPC analysis)');
-        updateKScores({ ...deps, forceDeepRefresh: true });
-    }, DEEP_INTERVAL);
+    // DISABLED: Bulk K-Score updates - these burned too many credits
+    // setInterval(() => updateKScores(deps), KSCORE_INTERVAL);
+    // setInterval(() => updateKScores({ ...deps, forceDeepRefresh: true }), DEEP_INTERVAL);
+    // setTimeout(() => updateKScores(deps), 30000);
 
     // ============================================
-    // STALENESS DETECTION & REFRESH
-    // Check for stale tokens every 2 hours and trigger refresh
+    // MINIMAL STALENESS DETECTION (φ-reduced)
+    // Check every 12 hours, refresh max 2 tokens
+    // Cost: 2 × 1,600 × 2/day = 6,400 cr/day (acceptable)
     // ============================================
-    const STALENESS_CHECK_INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
+    const STALENESS_CHECK_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours (was 2h)
+    const MAX_STALE_TOKENS_PER_CYCLE = 2; // (was 5)
 
     setInterval(async () => {
         try {
             const staleTokens = await verification.getStaleTokens(deps.db);
 
             if (staleTokens.length > 0) {
-                logger.warn(`[Staleness] Found ${staleTokens.length} stale tokens (>${verification.STALENESS_THRESHOLD_MS / (60*60*1000)}h old)`);
+                logger.warn(`[Staleness] Found ${staleTokens.length} stale tokens - refreshing max ${MAX_STALE_TOKENS_PER_CYCLE}`);
 
-                // Refresh up to 5 stale tokens per cycle
-                const tokensToRefresh = staleTokens.slice(0, 5);
+                // Refresh only highest-volume stale tokens (most important)
+                const tokensToRefresh = staleTokens
+                    .sort((a, b) => (b.volume24h || 0) - (a.volume24h || 0))
+                    .slice(0, MAX_STALE_TOKENS_PER_CYCLE);
 
                 for (const token of tokensToRefresh) {
-                    logger.info(`[Staleness] Refreshing stale token: ${token.symbol} (${token.ageHours}h old)`);
+                    logger.info(`[Staleness] Refreshing: ${token.symbol} (${token.ageHours}h old, $${token.volume24h || 0} vol)`);
                     try {
                         await updateSingleToken(deps, token.mint);
 
@@ -4094,7 +4103,7 @@ function start(deps) {
                             entityId: token.mint,
                             oldValue: { ageHours: token.ageHours, k_score: token.k_score },
                             source: 'staleness_detector',
-                            metadata: { reason: 'No holder activity in staleness window' }
+                            metadata: { reason: 'Minimal staleness refresh (RPC optimized)' }
                         }).catch(_e => {});
 
                     } catch (err) {
@@ -4106,9 +4115,6 @@ function start(deps) {
             logger.error(`[Staleness] Check failed: ${err.message}`);
         }
     }, STALENESS_CHECK_INTERVAL);
-
-    // Run once after startup (delay 30s to let other services init)
-    setTimeout(() => updateKScores(deps), 30000);
 
     // Initialize audit table (async, non-blocking)
     setTimeout(() => {

@@ -139,10 +139,12 @@ async function getSolPricePyth() {
     try {
         const { PublicKey, Connection } = require('@solana/web3.js');
 
-        const heliusUrl = config.HELIUS_API_KEY
+        // Use Helius if available, otherwise public RPC
+        // Pyth is a simple account read, public RPC works fine
+        const rpcUrl = config.HELIUS_API_KEY
             ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
-            : HELIUS_RPC_URL;
-        const connection = new Connection(heliusUrl, 'confirmed');
+            : 'https://api.mainnet-beta.solana.com';
+        const connection = new Connection(rpcUrl, 'confirmed');
 
         const accountInfo = await connection.getAccountInfo(
             new PublicKey(PYTH_SOL_USD_FEED)

@@ -213,7 +213,7 @@ const REFRESH_TIERS = Object.freeze({
  * Source: https://www.helius.dev/docs/billing/credits
  */
 const CREDIT_COSTS = Object.freeze({
-    // Standard RPC (1 credit)
+    // Standard RPC (1 credit each)
     getAccountInfo: 1,
     getBalance: 1,
     getBlock: 1,
@@ -224,7 +224,18 @@ const CREDIT_COSTS = Object.freeze({
     getSignaturesForAddress: 1,
     getTransaction: 1,
     getProgramAccounts: 1,
-    getMultipleAccounts: 1,  // 1 per account
+    getMultipleAccounts: 1,
+    getTokenSupply: 1,
+    getParsedTransaction: 1,
+    getLatestBlockhash: 1,
+    getMinimumBalanceForRentExemption: 1,
+
+    // Batch methods (scale with size, use base cost)
+    getMultipleAccountsInfo: 1,  // Per 100 accounts
+
+    // Parsed methods (slightly more expensive)
+    getParsedTokenAccountsByOwner: 5,  // Scales with token count
+    getParsedProgramAccounts: 5,
 
     // DAS API (5-10 credits)
     getAsset: 5,
@@ -238,7 +249,7 @@ const CREDIT_COSTS = Object.freeze({
     parseTransaction: 10,
     getEnhancedTransactions: 100,
 
-    // Default
+    // Default for unknown methods
     default: 1,
 });
 

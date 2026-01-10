@@ -5,9 +5,146 @@ const { getRedis } = require('./redis');
 const { getRPCProvider, getConnection } = require('./rpcProvider');
 
 // φ-based sampling and cache TTLs (SINGLE SOURCE OF TRUTH)
-const { CACHE_TTL, SAMPLING } = require('./rpcHarmony');
+const { CACHE_TTL, SAMPLING, getCreditCost } = require('./rpcHarmony');
+const { consumeCredits } = require('./rpcHardcap');
 
 let connection = null;
+let trackedConnection = null;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRACKED CONNECTION - Automatic RPC Credit Tracking
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * RPC methods that consume Helius credits and should be tracked
+ * These are the @solana/web3.js Connection methods that make actual RPC calls
+ */
+const TRACKED_RPC_METHODS = new Set([
+    // Account queries
+    'getAccountInfo',
+    'getAccountInfoAndContext',
+    'getMultipleAccountsInfo',
+    'getMultipleAccountsInfoAndContext',
+    'getParsedAccountInfo',
+
+    // Token methods
+    'getTokenAccountBalance',
+    'getTokenAccountsByOwner',
+    'getParsedTokenAccountsByOwner',
+    'getTokenLargestAccounts',
+    'getTokenSupply',
+
+    // Transaction methods
+    'getTransaction',
+    'getParsedTransaction',
+    'getTransactions',
+    'getParsedTransactions',
+    'getSignaturesForAddress',
+    'getSignatureStatuses',
+
+    // Program methods
+    'getProgramAccounts',
+    'getParsedProgramAccounts',
+
+    // Block/slot methods
+    'getBlock',
+    'getBlockHeight',
+    'getSlot',
+    'getLatestBlockhash',
+    'getBalance',
+    'getMinimumBalanceForRentExemption',
+
+    // Send methods (less common but still RPC)
+    'sendTransaction',
+    'sendRawTransaction',
+    'confirmTransaction',
+]);
+
+/**
+ * Calculate dynamic credit cost based on method and result
+ *
+ * Some methods have variable costs (e.g., getMultipleAccountsInfo scales with batch size)
+ *
+ * @param {string} method - RPC method name
+ * @param {Array} args - Method arguments
+ * @param {any} result - Method result (for post-call cost calculation)
+ * @returns {number} Credit cost
+ */
+function calculateDynamicCost(method, args, result) {
+    const baseCost = getCreditCost(method);
+
+    // Scale getMultipleAccountsInfo by batch size (1 credit per 100 accounts)
+    if (method === 'getMultipleAccountsInfo' || method === 'getMultipleAccountsInfoAndContext') {
+        const batchSize = args[0]?.length || 1;
+        return Math.max(1, Math.ceil(batchSize / 100));
+    }
+
+    // getParsedTokenAccountsByOwner can be expensive for wallets with many tokens
+    if (method === 'getParsedTokenAccountsByOwner') {
+        const resultCount = result?.value?.length || 1;
+        return Math.max(baseCost, Math.ceil(resultCount / 10));
+    }
+
+    return baseCost;
+}
+
+/**
+ * Create a tracked connection wrapper using Proxy
+ *
+ * This wraps the Solana Connection object and automatically tracks
+ * all RPC calls through the HARDCAP system.
+ *
+ * Philosophy: "Don't trust, verify" - every RPC call is tracked
+ *
+ * @param {Connection} conn - The underlying Solana Connection
+ * @returns {Proxy} Tracked connection that auto-tracks credits
+ */
+function createTrackedConnection(conn) {
+    return new Proxy(conn, {
+        get(target, prop) {
+            const value = target[prop];
+
+            // Non-functions pass through unchanged
+            if (typeof value !== 'function') {
+                return value;
+            }
+
+            // Non-tracked methods pass through unchanged (bind to preserve 'this')
+            if (!TRACKED_RPC_METHODS.has(prop)) {
+                return value.bind(target);
+            }
+
+            // Wrap tracked RPC methods
+            return async (...args) => {
+                const startTime = Date.now();
+                let result;
+                let error;
+
+                try {
+                    result = await value.apply(target, args);
+                    return result;
+                } catch (e) {
+                    error = e;
+                    throw e;
+                } finally {
+                    // Track credits even on error (RPC was still called)
+                    const cost = calculateDynamicCost(prop, args, result);
+                    const duration = Date.now() - startTime;
+
+                    // Fire-and-forget credit tracking (don't slow down the call)
+                    consumeCredits(prop, cost).catch(e => {
+                        logger.debug(`[TrackedConnection] Credit tracking failed: ${e.message}`);
+                    });
+
+                    // Debug logging for expensive calls
+                    if (cost >= 5 || duration > 1000) {
+                        logger.debug(`[TrackedConnection] ${prop}: ${cost} credits, ${duration}ms${error ? ' (ERROR)' : ''}`);
+                    }
+                }
+            };
+        }
+    });
+}
 
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
@@ -65,12 +202,36 @@ function createConnection() {
 }
 
 /**
- * Singleton connection provider.
- * @param {boolean} forceNew - If true, creates a fresh connection instance (useful for listener restarts)
+ * Singleton connection provider with automatic credit tracking.
+ *
+ * Returns a TrackedConnection that automatically tracks all RPC calls
+ * through the HARDCAP system. This ensures accurate credit accounting
+ * across all services using getSolanaConnection().
+ *
+ * @param {boolean} forceNew - If true, creates a fresh connection instance
+ * @returns {Proxy<Connection>} Tracked connection with auto credit tracking
  */
 function getSolanaConnection(forceNew = false) {
     if (!connection || forceNew) {
         connection = createConnection();
+        trackedConnection = createTrackedConnection(connection);
+        logger.info('[TrackedConnection] Created new tracked connection');
+    }
+    return trackedConnection;
+}
+
+/**
+ * Get raw (untracked) connection for special cases
+ *
+ * Use sparingly - only for WebSocket subscriptions or cases where
+ * credit tracking would cause issues. Most code should use getSolanaConnection().
+ *
+ * @returns {Connection} Raw untracked connection
+ */
+function getRawConnection() {
+    if (!connection) {
+        connection = createConnection();
+        trackedConnection = createTrackedConnection(connection);
     }
     return connection;
 }
@@ -326,7 +487,8 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
 }
 
 module.exports = {
-    getSolanaConnection,  // Legacy: direct connection (for WebSocket listeners)
+    getSolanaConnection,  // Tracked connection with auto credit tracking
+    getRawConnection,     // Raw connection for WebSocket subscriptions only
     getConnection,        // L2: provider-managed connection with fallback
     getRPCProvider,       // L2: full provider access
     analyzeTokenHolders,

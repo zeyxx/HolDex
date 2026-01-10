@@ -41,6 +41,47 @@ const _RAYDIUM_AMM_V4 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 const _RAYDIUM_CLMM = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
 const _ORCA_WHIRLPOOL = 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc';
 
+// ============================================
+// PUMPFUN ON-CHAIN - "onchain in truth"
+// ============================================
+// Philosophy: Verify prices directly from blockchain state
+// No third-party API dependencies for PumpFun tokens
+
+// PumpFun Bonding Curve Program - for tokens still on curve
+const PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+// PumpSwap AMM Program - for graduated tokens (constant product AMM)
+const PUMPSWAP_AMM_PROGRAM_ID = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+
+// Bonding curve account layout (49 bytes):
+// [0-7]:  discriminator
+// [8-15]: virtual_token_reserves (u64)
+// [16-23]: virtual_sol_reserves (u64)
+// [24-31]: real_token_reserves (u64)
+// [32-39]: real_sol_reserves (u64)
+// [40-47]: token_total_supply (u64)
+// [48]: complete (bool - true = graduated to PumpSwap)
+const PUMPFUN_LAYOUT = {
+    VIRTUAL_TOKEN_RESERVES: 8,
+    VIRTUAL_SOL_RESERVES: 16,
+    REAL_TOKEN_RESERVES: 24,
+    REAL_SOL_RESERVES: 32,
+    TOKEN_TOTAL_SUPPLY: 40,
+    COMPLETE: 48,
+    ACCOUNT_SIZE: 49
+};
+
+// PumpSwap AMM pool layout (constant product x*y=k):
+// Pool account contains base/quote vaults and reserves
+// Reserved for future PumpSwap AMM integration
+const _PUMPSWAP_LAYOUT = {
+    // Pool account structure (simplified)
+    BASE_MINT: 8,        // offset 8, 32 bytes
+    QUOTE_MINT: 40,      // offset 40, 32 bytes
+    BASE_VAULT: 72,      // offset 72, 32 bytes
+    QUOTE_VAULT: 104,    // offset 104, 32 bytes
+    ACCOUNT_SIZE: 200    // minimum expected size
+};
+
 // Cache settings
 const PRICE_CACHE_TTL = 60000;      // 1 minute for prices
 const LIQUIDITY_CACHE_TTL = 300000; // 5 minutes for liquidity
@@ -464,6 +505,239 @@ async function _discoverPools(mint) {
 }
 
 // ============================================
+// PUMPFUN ON-CHAIN PRICE CALCULATION
+// ============================================
+// "onchain in truth" - derive prices from blockchain state
+// Two modes: Bonding Curve (pre-graduation) and PumpSwap AMM (post-graduation)
+
+/**
+ * Derive PumpFun bonding curve PDA from token mint
+ * @param {string} mint - Token mint address
+ * @returns {string} Bonding curve account address
+ */
+function derivePumpFunBondingCurve(mint) {
+    const { PublicKey } = require('@solana/web3.js');
+    const mintPubkey = new PublicKey(mint);
+    const programId = new PublicKey(PUMPFUN_PROGRAM_ID);
+
+    const [bondingCurve] = PublicKey.findProgramAddressSync(
+        [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
+        programId
+    );
+
+    return bondingCurve.toBase58();
+}
+
+/**
+ * Fetch price from PumpFun bonding curve (on-chain)
+ * For tokens still on the bonding curve (not yet graduated)
+ *
+ * @param {string} mint - Token mint address
+ * @param {Connection} connection - Solana RPC connection (optional)
+ * @returns {Object|null} Price data or null if not on curve
+ */
+async function fetchPumpFunBondingCurvePrice(mint, connection = null) {
+    try {
+        const { PublicKey, Connection } = require('@solana/web3.js');
+
+        // Get or create connection
+        if (!connection) {
+            const heliusUrl = config.HELIUS_API_KEY
+                ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
+                : HELIUS_RPC_URL;
+            connection = new Connection(heliusUrl, 'confirmed');
+        }
+
+        // Derive bonding curve PDA
+        const bondingCurveAddress = derivePumpFunBondingCurve(mint);
+        const bondingCurvePubkey = new PublicKey(bondingCurveAddress);
+
+        // Fetch bonding curve account
+        const accountInfo = await connection.getAccountInfo(bondingCurvePubkey);
+
+        if (!accountInfo || !accountInfo.data) {
+            // Token not on PumpFun bonding curve
+            return null;
+        }
+
+        const data = accountInfo.data;
+
+        // Verify account size
+        if (data.length < PUMPFUN_LAYOUT.ACCOUNT_SIZE) {
+            logger.debug(`[PumpFun] Invalid bonding curve size for ${mint}`);
+            return null;
+        }
+
+        // Check if completed (graduated to PumpSwap)
+        const isComplete = data[PUMPFUN_LAYOUT.COMPLETE] === 1;
+        if (isComplete) {
+            // Token graduated - should use PumpSwap AMM instead
+            return { graduated: true, mint };
+        }
+
+        // Read virtual reserves (u64 little-endian)
+        const virtualTokenReserves = data.readBigUInt64LE(PUMPFUN_LAYOUT.VIRTUAL_TOKEN_RESERVES);
+        const virtualSolReserves = data.readBigUInt64LE(PUMPFUN_LAYOUT.VIRTUAL_SOL_RESERVES);
+        // Note: realTokenReserves available at REAL_TOKEN_RESERVES offset if needed
+        const realSolReserves = data.readBigUInt64LE(PUMPFUN_LAYOUT.REAL_SOL_RESERVES);
+
+        // Calculate price: SOL per token = virtual_sol / virtual_token
+        // Convert from lamports (9 decimals) and token units (6 decimals for PumpFun)
+        const solPerToken = Number(virtualSolReserves) / Number(virtualTokenReserves);
+
+        // Get SOL price for USD conversion
+        const solPrice = await getSolPrice();
+        const priceUsd = solPerToken * solPrice;
+
+        // Calculate liquidity from real reserves
+        const realSolAmount = Number(realSolReserves) / 1e9; // lamports to SOL
+        const liquidityUsd = realSolAmount * solPrice * 2; // 2-sided liquidity
+
+        // Calculate market cap (PumpFun tokens are 1B supply, 6 decimals)
+        const totalSupply = 1_000_000_000; // 1B tokens
+        const mcap = priceUsd * totalSupply;
+
+        const now = Date.now();
+
+        logger.debug(`[PumpFun] On-chain price for ${mint}: $${priceUsd.toFixed(12)} (bonding curve)`);
+
+        return {
+            priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
+            mcap: clampValue(mcap, PRICE_BOUNDS.MIN_MCAP, PRICE_BOUNDS.MAX_MCAP),
+            liquidity: clampValue(liquidityUsd, PRICE_BOUNDS.MIN_LIQUIDITY, PRICE_BOUNDS.MAX_LIQUIDITY),
+            volume24h: null, // Not available on-chain
+            change24h: null,
+            change1h: null,
+            change5m: null,
+            pairAddress: bondingCurveAddress,
+            dex: 'pumpfun',
+            source: 'onchain_bonding_curve',
+            timestamp: now,
+            confidence: 'high', // On-chain = highest confidence
+            onChain: true,
+            graduated: false,
+            virtualReserves: {
+                token: Number(virtualTokenReserves),
+                sol: Number(virtualSolReserves)
+            }
+        };
+
+    } catch (e) {
+        logger.debug(`[PumpFun] Bonding curve fetch error for ${mint}: ${e.message}`);
+        return null;
+    }
+}
+
+/**
+ * Batch fetch PumpFun on-chain prices for multiple tokens
+ * Uses getMultipleAccountsInfo for efficiency
+ *
+ * @param {string[]} mints - Array of token mint addresses
+ * @returns {Map<string, Object>} Map of mint -> price data
+ */
+async function fetchPumpFunOnChainPrices(mints) {
+    if (!mints || mints.length === 0) return new Map();
+
+    const results = new Map();
+
+    try {
+        const { PublicKey, Connection } = require('@solana/web3.js');
+
+        // Get connection
+        const heliusUrl = config.HELIUS_API_KEY
+            ? `${HELIUS_RPC_URL}?api-key=${config.HELIUS_API_KEY}`
+            : HELIUS_RPC_URL;
+        const connection = new Connection(heliusUrl, 'confirmed');
+
+        // Derive all bonding curve PDAs
+        const bondingCurves = mints.map(mint => {
+            try {
+                return {
+                    mint,
+                    pda: new PublicKey(derivePumpFunBondingCurve(mint))
+                };
+            } catch {
+                return null;
+            }
+        }).filter(Boolean);
+
+        if (bondingCurves.length === 0) return results;
+
+        // Batch fetch accounts (max 100 per call)
+        const BATCH_SIZE = 100;
+        const solPrice = await getSolPrice();
+        const now = Date.now();
+
+        for (let i = 0; i < bondingCurves.length; i += BATCH_SIZE) {
+            const batch = bondingCurves.slice(i, i + BATCH_SIZE);
+            const pubkeys = batch.map(b => b.pda);
+
+            try {
+                const accounts = await connection.getMultipleAccountsInfo(pubkeys);
+
+                for (let j = 0; j < accounts.length; j++) {
+                    const accountInfo = accounts[j];
+                    const { mint, pda } = batch[j];
+
+                    if (!accountInfo || !accountInfo.data) continue;
+
+                    const data = accountInfo.data;
+                    if (data.length < PUMPFUN_LAYOUT.ACCOUNT_SIZE) continue;
+
+                    // Check if graduated
+                    const isComplete = data[PUMPFUN_LAYOUT.COMPLETE] === 1;
+                    if (isComplete) {
+                        // Mark as graduated - caller should try PumpSwap or Raydium
+                        results.set(mint, { graduated: true, mint });
+                        continue;
+                    }
+
+                    // Read reserves
+                    const virtualTokenReserves = data.readBigUInt64LE(PUMPFUN_LAYOUT.VIRTUAL_TOKEN_RESERVES);
+                    const virtualSolReserves = data.readBigUInt64LE(PUMPFUN_LAYOUT.VIRTUAL_SOL_RESERVES);
+                    const realSolReserves = data.readBigUInt64LE(PUMPFUN_LAYOUT.REAL_SOL_RESERVES);
+
+                    // Calculate price
+                    const solPerToken = Number(virtualSolReserves) / Number(virtualTokenReserves);
+                    const priceUsd = solPerToken * solPrice;
+
+                    // Liquidity and mcap
+                    const realSolAmount = Number(realSolReserves) / 1e9;
+                    const liquidityUsd = realSolAmount * solPrice * 2;
+                    const mcap = priceUsd * 1_000_000_000; // 1B supply
+
+                    results.set(mint, {
+                        priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
+                        mcap: clampValue(mcap, PRICE_BOUNDS.MIN_MCAP, PRICE_BOUNDS.MAX_MCAP),
+                        liquidity: clampValue(liquidityUsd, PRICE_BOUNDS.MIN_LIQUIDITY, PRICE_BOUNDS.MAX_LIQUIDITY),
+                        volume24h: null,
+                        change24h: null,
+                        change1h: null,
+                        change5m: null,
+                        pairAddress: pda.toBase58(),
+                        dex: 'pumpfun',
+                        source: 'onchain_bonding_curve',
+                        timestamp: now,
+                        confidence: 'high',
+                        onChain: true,
+                        graduated: false
+                    });
+                }
+            } catch (e) {
+                logger.debug(`[PumpFun] Batch fetch error: ${e.message}`);
+            }
+        }
+
+        logger.debug(`[PumpFun] On-chain batch: ${results.size}/${mints.length} tokens`);
+        return results;
+
+    } catch (e) {
+        logger.error(`[PumpFun] On-chain prices error: ${e.message}`);
+        return results;
+    }
+}
+
+// ============================================
 // RAYDIUM API (for pool discovery - free)
 // ============================================
 
@@ -557,7 +831,8 @@ async function getPrice(mint, options = {}) {
 
 /**
  * Batch fetch prices for multiple tokens
- * Uses Raydium as primary (free), Jupiter as fallback (paid)
+ * Priority: Raydium API > PumpFun On-Chain > Jupiter API
+ * Philosophy: "onchain in truth" - prefer on-chain for PumpFun tokens
  *
  * @param {string[]} mints - Array of token mint addresses
  * @returns {Map<string, Object>} Map of mint -> price data
@@ -568,21 +843,37 @@ async function fetchBatchPrices(mints) {
     const results = new Map();
     const now = Date.now();
 
-    // 1. PRIMARY: Batch fetch from Raydium (FREE)
+    // 1. PRIMARY: Batch fetch from Raydium API (FREE, works for graduated tokens)
     const raydiumPrices = await fetchRaydiumPrices(mints);
 
     // 2. Find tokens missing from Raydium
-    const missingMints = mints.filter(m => !raydiumPrices.has(m));
+    const missingAfterRaydium = mints.filter(m => !raydiumPrices.has(m));
 
-    // 3. FALLBACK: Try Jupiter for missing tokens (if API key available)
-    let jupiterPrices = new Map();
-    if (missingMints.length > 0 && JUPITER_API_KEY) {
-        jupiterPrices = await fetchJupiterPrices(missingMints);
+    // 3. SECOND: Try PumpFun on-chain for missing tokens
+    // This catches tokens still on bonding curve that Raydium doesn't have
+    let pumpfunPrices = new Map();
+    if (missingAfterRaydium.length > 0) {
+        pumpfunPrices = await fetchPumpFunOnChainPrices(missingAfterRaydium);
+        // Filter out graduated tokens (they should have a price from Raydium)
+        for (const [mint, data] of pumpfunPrices) {
+            if (data.graduated) {
+                pumpfunPrices.delete(mint);
+            }
+        }
     }
 
-    // 4. Fetch pool info for liquidity/volume (parallel, rate-limited)
+    // 4. THIRD: Try Jupiter for remaining missing tokens (if API key available)
+    const missingAfterPumpFun = missingAfterRaydium.filter(m => !pumpfunPrices.has(m));
+    let jupiterPrices = new Map();
+    if (missingAfterPumpFun.length > 0 && JUPITER_API_KEY) {
+        jupiterPrices = await fetchJupiterPrices(missingAfterPumpFun);
+    }
+
+    // 5. Fetch pool info for liquidity/volume (parallel, rate-limited)
+    // Only for tokens NOT from PumpFun on-chain (which already has liquidity)
+    const tokensNeedingPoolInfo = mints.filter(m => !pumpfunPrices.has(m));
     const poolPromises = [];
-    for (const mint of mints) {
+    for (const mint of tokensNeedingPoolInfo) {
         poolPromises.push(
             getRaydiumPoolInfo(mint)
                 .then(data => ({ mint, data }))
@@ -606,11 +897,18 @@ async function fetchBatchPrices(mints) {
         }
     }
 
-    // 5. Combine results
+    // 6. Combine results with priority: Raydium > PumpFun OnChain > Jupiter > Pool
     for (const mint of mints) {
         const raydium = raydiumPrices.get(mint);
+        const pumpfun = pumpfunPrices.get(mint);
         const jupiter = jupiterPrices.get(mint);
         const pool = poolResults.get(mint);
+
+        // If PumpFun on-chain data available, use it directly (highest confidence)
+        if (pumpfun && pumpfun.priceUsd > 0) {
+            results.set(mint, pumpfun);
+            continue;
+        }
 
         // Get price from Raydium (primary) or Jupiter (fallback)
         const priceUsd = raydium?.priceUsd || jupiter?.priceUsd || pool?.price || null;
@@ -622,6 +920,16 @@ async function fetchBatchPrices(mints) {
         const liquidity = pool?.liquidity || null;
         const volume24h = pool?.volume24h || null;
 
+        // Determine source and dex
+        let source = 'pool';
+        let dex = pool?.dex || 'unknown';
+        if (raydium) {
+            source = 'raydium';
+            dex = pool?.dex || 'raydium';
+        } else if (jupiter) {
+            source = 'jupiter';
+        }
+
         results.set(mint, {
             priceUsd: clampValue(priceUsd, PRICE_BOUNDS.MIN_PRICE, PRICE_BOUNDS.MAX_PRICE),
             mcap: 0, // Calculated separately with supply
@@ -631,14 +939,14 @@ async function fetchBatchPrices(mints) {
             change1h: null,
             change5m: null,
             pairAddress: pool?.poolAddress || null,
-            dex: pool?.dex || 'raydium',
-            source: raydium ? 'raydium' : (jupiter ? 'jupiter' : 'pool'),
+            dex,
+            source,
             timestamp: now,
             confidence: raydium ? 'high' : 'medium'
         });
     }
 
-    logger.debug(`[PriceProvider] Batch: ${results.size}/${mints.length} tokens (Raydium: ${raydiumPrices.size}, Jupiter: ${jupiterPrices.size})`);
+    logger.debug(`[PriceProvider] Batch: ${results.size}/${mints.length} tokens (Raydium: ${raydiumPrices.size}, PumpFun: ${pumpfunPrices.size}, Jupiter: ${jupiterPrices.size})`);
     return results;
 }
 
@@ -708,6 +1016,15 @@ module.exports = {
     getJupiterPrice,
     getRaydiumPoolInfo,
     calculateOnChainLiquidity,
+
+    // PumpFun on-chain functions ("onchain in truth")
+    fetchPumpFunBondingCurvePrice,
+    fetchPumpFunOnChainPrices,
+    derivePumpFunBondingCurve,
+
+    // Program IDs (for external reference)
+    PUMPFUN_PROGRAM_ID,
+    PUMPSWAP_AMM_PROGRAM_ID,
 
     // Utilities
     clampValue,

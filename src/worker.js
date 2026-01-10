@@ -1,4 +1,8 @@
 require('dotenv').config();
+
+// Force SERVICE_TYPE for proper HARDCAP tracking
+process.env.SERVICE_TYPE = 'worker';
+
 const { initDB, getDB, enableIndexing, aggregateAndSaveToken } = require('./services/database');
 const { getClient, connectRedis } = require('./services/redis');
 const { findPoolsOnChain } = require('./services/pool_finder');
@@ -6,7 +10,13 @@ const { fetchTokenMetadata } = require('./utils/metaplex');
 const { getSolanaConnection } = require('./services/solana');
 const { PublicKey } = require('@solana/web3.js');
 const logger = require('./services/logger');
-const metadataUpdater = require('./tasks/metadataUpdater'); 
+const metadataUpdater = require('./tasks/metadataUpdater');
+const { logHardcapConfig } = require('./services/rpcHardcap');
+
+// Log HARDCAP config on startup
+logger.info('🔧 Background Worker Starting');
+logger.info(`   SERVICE_TYPE: ${process.env.SERVICE_TYPE}`);
+logHardcapConfig();
 
 const QUEUE_KEY = 'token_queue';
 const RETRY_KEY = 'token_queue:retry';

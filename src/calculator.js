@@ -16,14 +16,22 @@ require('dotenv').config();
 const config = require('./config/env');
 const logger = require('./services/logger');
 
+// Force SERVICE_TYPE for proper HARDCAP tracking
+process.env.SERVICE_TYPE = 'calculator';
+
 // Startup info
 logger.info('='.repeat(50));
 logger.info('🧠 HolDex Calculator Starting');
 logger.info(`   Node: ${process.version}`);
+logger.info(`   SERVICE_TYPE: ${process.env.SERVICE_TYPE}`);
 logger.info(`   DATABASE_URL: ${config.DATABASE_URL ? 'SET' : 'MISSING'}`);
 logger.info(`   HELIUS_API_KEY: ${config.HELIUS_API_KEY ? 'SET' : 'MISSING'}`);
 logger.info(`   REDIS_URL: ${config.REDIS_URL ? 'SET' : 'MISSING'}`);
 logger.info('='.repeat(50));
+
+// Initialize HARDCAP (φ-based credit limits)
+const { logHardcapConfig } = require('./services/rpcHardcap');
+logHardcapConfig();
 
 // Memory monitoring
 let heartbeatCount = 0;

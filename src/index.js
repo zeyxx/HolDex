@@ -1,12 +1,17 @@
 require('dotenv').config();
+
+// Force SERVICE_TYPE for proper HARDCAP tracking
+process.env.SERVICE_TYPE = 'api';
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const http = require('http'); 
+const http = require('http');
 const rateLimit = require('express-rate-limit');
-const compression = require('compression'); 
+const compression = require('compression');
 const config = require('./config/env');
 const logger = require('./services/logger');
+const { logHardcapConfig } = require('./services/rpcHardcap');
 const { initDB, getDB, preloadKnownMintsCache } = require('./services/database');
 const { connectRedis } = require('./services/redis');
 const { startSnapshotter } = require('./indexer/tasks/snapshotter');
@@ -546,6 +551,10 @@ async function startServer() {
                 res.status(500).json({ success: false, error: 'Internal Server Error' });
             }
         });
+
+        // Log HARDCAP configuration
+        logger.info(`   SERVICE_TYPE: ${process.env.SERVICE_TYPE}`);
+        logHardcapConfig();
 
         const PORT = process.env.PORT || 3000;
         server.listen(PORT, () => {

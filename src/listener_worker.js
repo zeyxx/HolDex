@@ -1,9 +1,18 @@
 console.log("🚀 LISTENER PROCESS LAUNCHING...");
 
 require('dotenv').config();
+
+// Force SERVICE_TYPE for proper HARDCAP tracking
+process.env.SERVICE_TYPE = 'listener';
+
 const { initDB, getDB } = require('./services/database');
 const { initRedis } = require('./services/redis');
 const logger = require('./services/logger');
+const { logHardcapConfig } = require('./services/rpcHardcap');
+
+// Log HARDCAP config on startup
+logger.info(`   SERVICE_TYPE: ${process.env.SERVICE_TYPE}`);
+logHardcapConfig();
 
 // --- TASKS ---
 const { updateSingleToken } = require('./tasks/kScoreUpdater');

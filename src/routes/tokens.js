@@ -1644,6 +1644,117 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/migrate-distributed-polling
+     * Create distributed polling tables (polling_tasks, node_work_history, etc.)
+     */
+    router.post('/admin/migrate-distributed-polling', requireAdmin, async (req, res) => {
+        const results = { tables: [], indexes: [], columns: [], errors: [] };
+
+        try {
+            // POLLING TASKS TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS polling_tasks (
+                    task_id SERIAL PRIMARY KEY,
+                    mint TEXT NOT NULL,
+                    priority INTEGER DEFAULT 100,
+                    reason TEXT NOT NULL DEFAULT 'scheduled',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at BIGINT NOT NULL,
+                    created_by TEXT,
+                    claimed_by TEXT,
+                    claimed_at BIGINT,
+                    completed_at BIGINT,
+                    attempts INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    k_score_result DOUBLE PRECISION
+                )
+            `);
+            results.tables.push('polling_tasks');
+
+            // NODE WORK HISTORY TABLE
+            await db.run(`
+                CREATE TABLE IF NOT EXISTS node_work_history (
+                    id SERIAL PRIMARY KEY,
+                    node_id TEXT NOT NULL,
+                    task_type TEXT NOT NULL DEFAULT 'polling',
+                    mint TEXT NOT NULL,
+                    completed_at BIGINT NOT NULL,
+                    duration_ms INTEGER,
+                    rpc_calls INTEGER DEFAULT 0,
+                    k_score_calculated BOOLEAN DEFAULT FALSE,
+                    error_message TEXT
+                )
+            `);
+            results.tables.push('node_work_history');
+
+            // Indexes for polling_tasks
+            const indexes = [
+                'CREATE UNIQUE INDEX IF NOT EXISTS idx_polling_tasks_unique_pending ON polling_tasks (mint) WHERE status = \'pending\'',
+                'CREATE INDEX IF NOT EXISTS idx_polling_tasks_pending_priority ON polling_tasks (priority ASC, created_at ASC) WHERE status = \'pending\'',
+                'CREATE INDEX IF NOT EXISTS idx_polling_tasks_status ON polling_tasks (status)',
+                'CREATE INDEX IF NOT EXISTS idx_polling_tasks_mint ON polling_tasks (mint, created_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_node_work_history_node ON node_work_history (node_id, completed_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_node_work_history_mint ON node_work_history (mint, completed_at DESC)',
+                'CREATE INDEX IF NOT EXISTS idx_consensus_snapshots_consensus_at ON consensus_snapshots (consensus_at DESC)'
+            ];
+
+            for (const sql of indexes) {
+                try {
+                    await db.run(sql);
+                    results.indexes.push(sql.match(/idx_\w+/)?.[0] || 'index');
+                } catch (e) {
+                    results.errors.push({ type: 'index', error: e.message });
+                }
+            }
+
+            // Add missing columns to nodes table
+            const nodeColumns = [
+                'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS credits DECIMAL(10,6) DEFAULT 1.618033988749895',
+                'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_work_at BIGINT',
+                'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS total_rpc_calls BIGINT DEFAULT 0',
+                'ALTER TABLE nodes ADD COLUMN IF NOT EXISTS verifications_24h INTEGER DEFAULT 0'
+            ];
+
+            for (const sql of nodeColumns) {
+                try {
+                    await db.run(sql);
+                    const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1];
+                    results.columns.push(col || 'column');
+                } catch (e) {
+                    results.errors.push({ type: 'column', error: e.message });
+                }
+            }
+
+            // Add missing columns to tokens table
+            const tokenColumns = [
+                'ALTER TABLE tokens ADD COLUMN IF NOT EXISTS k_score_source TEXT DEFAULT \'placeholder\''
+            ];
+
+            for (const sql of tokenColumns) {
+                try {
+                    await db.run(sql);
+                    const col = sql.match(/ADD COLUMN IF NOT EXISTS (\w+)/)?.[1];
+                    results.columns.push(`tokens.${col}` || 'column');
+                } catch (e) {
+                    results.errors.push({ type: 'column', error: e.message });
+                }
+            }
+
+            logger.info(`[Migration] Distributed polling complete: ${results.tables.length} tables, ${results.indexes.length} indexes`);
+
+            res.json({
+                success: true,
+                message: 'Distributed polling migration complete',
+                results
+            });
+
+        } catch (e) {
+            logger.error(`[Migration] Distributed polling failed: ${e.message}`);
+            res.status(500).json({ success: false, error: e.message, results });
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

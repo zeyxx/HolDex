@@ -446,6 +446,12 @@ class SignalAccumulator {
             this.signalRateWindow = this.signalRateWindow.filter(t => t > windowStart);
             this.globalSignalRate = this.signalRateWindow.length; // Signals per minute
 
+            // Skip judgment if already finalized (ACCEPT/REJECT are final)
+            // This prevents log spam from re-judging the same token on every swap
+            if (data.judgment_status === 'accepted' || data.judgment_status === 'rejected') {
+                return { data, judgment: null }; // Already judged, just accumulate signals
+            }
+
             // Check if ready for judgment
             const judgment = await this.tryJudge(mint, data);
 

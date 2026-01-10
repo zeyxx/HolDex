@@ -701,7 +701,10 @@ function init(deps) {
                 }
             }
 
-            logger.info(`📥 [NewToken] Discovered: ${discovered}, Skipped: ${skipped}`);
+            // Only log when we discover something (reduce noise)
+            if (discovered > 0) {
+                logger.info(`📥 [NewToken] Discovered: ${discovered}, Skipped: ${skipped}`);
+            }
 
             res.status(200).json({
                 received: true,

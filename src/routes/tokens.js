@@ -1918,6 +1918,59 @@ function init(deps) {
     });
 
     /**
+     * POST /admin/reset-queue
+     * Nuclear option: Clear entire legacy queue (for hybrid C+D migration)
+     * Accepts password via query param for convenience
+     */
+    router.post('/admin/reset-queue', async (req, res) => {
+        // Accept password via query param or header
+        const password = req.query.password || req.headers['x-admin-password'];
+        if (password !== config.ADMIN_PASSWORD) {
+            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+
+        const { getClient } = require('../services/redis');
+        const redis = getClient();
+
+        if (!redis) {
+            return res.status(503).json({ success: false, error: 'Redis not available' });
+        }
+
+        try {
+            // Get counts before clearing
+            const [queueSize, processingSize, failedSize] = await Promise.all([
+                redis.scard('holdex:new_token_queue'),
+                redis.scard('holdex:processing_tokens'),
+                redis.scard('holdex:failed_tokens')
+            ]);
+
+            // Nuclear clear - delete entire keys
+            await Promise.all([
+                redis.del('holdex:new_token_queue'),
+                redis.del('holdex:processing_tokens'),
+                redis.del('holdex:failed_tokens'),
+                redis.del('holdex:queue_data')
+            ]);
+
+            logger.info(`🗑️ [Reset] Cleared queue: ${queueSize} queued, ${processingSize} processing, ${failedSize} failed`);
+
+            res.json({
+                success: true,
+                cleared: {
+                    queued: queueSize,
+                    processing: processingSize,
+                    failed: failedSize,
+                    total: queueSize + processingSize + failedSize
+                },
+                message: 'Queue reset. Hybrid C+D will now only process trade-triggered tokens.'
+            });
+        } catch (e) {
+            logger.error(`[Reset] Error: ${e.message}`);
+            res.status(500).json({ success: false, error: e.message });
+        }
+    });
+
+    /**
      * GET /api/token/:mint/evolution
      * K-Score evolution with price correlation for overlay charts
      * SECURITY: Only available for verified tokens (hasCommunityUpdate=TRUE)

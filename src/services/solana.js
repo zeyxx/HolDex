@@ -167,9 +167,9 @@ async function getHolderCountFromRPC(mintAddress) {
             let count = 0;
             let cursor = null;
 
-            // Paginate through holders (cap at 10 pages = 10k holders for efficiency)
-            // Large tokens (USDT/USDC) have millions - sampling top 10k is sufficient
-            const MAX_PAGES = 10;
+            // Paginate through holders (cap at 5 pages = 5k holders)
+            // Most tokens have <5k holders; early exit saves credits
+            const MAX_PAGES = 5;
             let page = 0;
 
             while (page < MAX_PAGES) {
@@ -183,9 +183,17 @@ async function getHolderCountFromRPC(mintAddress) {
 
                 if (!result?.token_accounts) break;
 
+                const pageCount = result.token_accounts.length;
+
                 // Count accounts with balance > 0
                 for (const acc of result.token_accounts) {
                     if (acc.amount > 0) count++;
+                }
+
+                // Early exit: if page has <1000 results, we've reached the end
+                if (pageCount < 1000) {
+                    logger.debug(`[Holders] Early exit at page ${page + 1} (${pageCount} accounts)`);
+                    break;
                 }
 
                 cursor = result.cursor;
@@ -273,13 +281,14 @@ async function analyzeTokenHolders(mintAddress, excludeAddresses = []) {
         let validSamples = 0;
         const excludeSet = new Set(excludeAddresses.map(a => a ? a.toString() : ''));
 
+        // Sample top 5 holders only (saves 10 RPC calls vs 15, statistically sufficient)
         for (const acc of topAccounts) {
-            if (validSamples >= 15) break;
+            if (validSamples >= 5) break;
             if (excludeSet.has(acc.address.toString())) continue;
 
             try {
                 // getSignaturesForAddress is optimal for timestamp-only queries (168ms vs 1000ms+)
-                const signatures = await provider.getSignaturesForAddress(acc.address, { limit: 50 });
+                const signatures = await provider.getSignaturesForAddress(acc.address, { limit: 20 });
 
                 // Note: RPC tracking handled in helius.js provider
 

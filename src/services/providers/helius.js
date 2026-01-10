@@ -3,10 +3,16 @@
  *
  * Supports both Standard RPC and Enhanced APIs (DAS, Enhanced Transactions)
  * This is the primary provider with full feature support.
+ *
+ * HARDCAP Integration:
+ *   - All RPC calls go through consumeCredits() for per-node limits
+ *   - API nodes: never blocked, just tracked
+ *   - Calculator/Listener/Worker: throttled when limit reached
  */
 
 const { Connection, PublicKey } = require('@solana/web3.js');
-const { trackRpcCall, getCreditCost } = require('../rpcMonitor');
+const { trackRpcCall } = require('../rpcMonitor');
+const { consumeCredits, getCreditCost } = require('../rpcHardcap');
 
 class HeliusProvider {
     constructor(apiKey) {
@@ -43,6 +49,22 @@ class HeliusProvider {
         return this.connection;
     }
 
+    /**
+     * Track RPC call with HARDCAP enforcement
+     *
+     * Consumes credits and enforces per-node limits.
+     * Also calls legacy trackRpcCall for backward compatibility.
+     *
+     * @param {string} method - RPC method name
+     * @param {number} credits - Credit cost
+     * @returns {Promise<Object>} Consumption result
+     */
+    async _trackWithHardcap(method, credits) {
+        // Track in both systems for now (hardcap + legacy monitor)
+        trackRpcCall(method, credits);
+        return consumeCredits(method, credits);
+    }
+
     // ============================================
     // STANDARD RPC METHODS
     // ============================================
@@ -51,7 +73,7 @@ class HeliusProvider {
         const conn = this.getConnection();
         const pk = typeof pubkey === 'string' ? new PublicKey(pubkey) : pubkey;
         const result = await conn.getAccountInfo(pk);
-        trackRpcCall('getAccountInfo', 1);
+        await this._trackWithHardcap('getAccountInfo', 1);
         return result;
     }
 
@@ -59,7 +81,7 @@ class HeliusProvider {
         const conn = this.getConnection();
         const pks = pubkeys.map(p => typeof p === 'string' ? new PublicKey(p) : p);
         const result = await conn.getMultipleAccountsInfo(pks);
-        trackRpcCall('getMultipleAccounts', pks.length); // 1 credit per account
+        await this._trackWithHardcap('getMultipleAccounts', pks.length); // 1 credit per account
         return result;
     }
 
@@ -67,7 +89,7 @@ class HeliusProvider {
         const conn = this.getConnection();
         const pk = typeof mint === 'string' ? new PublicKey(mint) : mint;
         const result = await conn.getTokenLargestAccounts(pk);
-        trackRpcCall('getTokenLargestAccounts', 1);
+        await this._trackWithHardcap('getTokenLargestAccounts', 1);
         return result;
     }
 
@@ -75,7 +97,7 @@ class HeliusProvider {
         const conn = this.getConnection();
         const pk = typeof address === 'string' ? new PublicKey(address) : address;
         const result = await conn.getSignaturesForAddress(pk, options);
-        trackRpcCall('getSignaturesForAddress', 1);
+        await this._trackWithHardcap('getSignaturesForAddress', 1);
         return result;
     }
 
@@ -106,7 +128,7 @@ class HeliusProvider {
         const conn = this.getConnection();
         const pk = typeof programId === 'string' ? new PublicKey(programId) : programId;
         const result = await conn.getProgramAccounts(pk, config);
-        trackRpcCall('getProgramAccounts', 1);
+        await this._trackWithHardcap('getProgramAccounts', 1);
         return result;
     }
 
@@ -140,7 +162,7 @@ class HeliusProvider {
             throw new Error(`Helius Enhanced API error: ${response.status}`);
         }
         const result = await response.json();
-        trackRpcCall('getEnhancedTransactions', 100);
+        await this._trackWithHardcap('getEnhancedTransactions', 100);
         return result;
     }
 
@@ -170,7 +192,7 @@ class HeliusProvider {
         if (data.error) {
             throw new Error(data.error.message);
         }
-        trackRpcCall('getTokenAccounts', 10);
+        await this._trackWithHardcap('getTokenAccounts', 10);
         return data.result;
     }
 
@@ -191,7 +213,7 @@ class HeliusProvider {
         if (data.error) {
             throw new Error(data.error.message);
         }
-        trackRpcCall(method, getCreditCost(method));
+        await this._trackWithHardcap(method, getCreditCost(method));
         return data.result;
     }
 
@@ -203,7 +225,7 @@ class HeliusProvider {
             const start = Date.now();
             const conn = this.getConnection();
             await conn.getSlot();
-            trackRpcCall('getSlot', 1);
+            await this._trackWithHardcap('getSlot', 1);
             return { healthy: true, latency: Date.now() - start };
         } catch (e) {
             return { healthy: false, error: e.message };

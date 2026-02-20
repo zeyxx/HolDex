@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HolDex Wallet Adapter - Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #999;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status-card {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .status-label {
+            color: #666;
+            font-weight: 500;
+        }
+
+        .status-value {
+            color: #333;
+            font-family: 'Courier New', monospace;
+            word-break: break-all;
+        }
+
+        .wallets-section {
+            margin-bottom: 30px;
+        }
+
+        .wallets-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+        }
+
+        .wallet-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .wallet-btn {
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            background: white;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .wallet-btn:hover {
+            border-color: #667eea;
+            background: #f0f0ff;
+        }
+
+        .wallet-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .wallet-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .icon {
+            font-size: 16px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+        }
+
+        .btn-secondary:hover {
+            background: #f0f0ff;
+        }
+
+        .message-box {
+            background: #f0f8ff;
+            border: 1px solid #b3d9ff;
+            color: #0066cc;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+
+        .error-box {
+            background: #fff5f5;
+            border: 1px solid #ffb3b3;
+            color: #cc0000;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+
+        .footer {
+            font-size: 12px;
+            color: #999;
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 HolDex Wallet Adapter</h1>
+        <p class="subtitle">Silent-first wallet detection & connection</p>
+
+        <div id="message-container"></div>
+
+        <div class="status-card">
+            <div class="status-item">
+                <span class="status-label">Status</span>
+                <span class="status-value" id="status">Disconnected</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Public Key</span>
+                <span class="status-value" id="publicKey">None</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Detected Wallets</span>
+                <span class="status-value" id="detectedWallets">Scanning...</span>
+            </div>
+        </div>
+
+        <div class="wallets-section">
+            <div class="wallets-title">Available Wallets</div>
+            <div class="wallet-buttons" id="wallet-buttons">
+                <button class="wallet-btn" id="phantom-btn" disabled>
+                    <span class="icon">👻</span> Phantom
+                </button>
+                <button class="wallet-btn" id="solflare-btn" disabled>
+                    <span class="icon">🔥</span> Solflare
+                </button>
+                <button class="wallet-btn" id="backpack-btn" disabled>
+                    <span class="icon">🎒</span> Backpack
+                </button>
+            </div>
+        </div>
+
+        <div class="action-buttons">
+            <button class="btn btn-primary" id="sign-btn" disabled>
+                Sign Message
+            </button>
+            <button class="btn btn-secondary" id="disconnect-btn" disabled>
+                Disconnect
+            </button>
+        </div>
+
+        <div class="footer">
+            <p>✨ Framework-agnostic wallet detection</p>
+            <p>Wallet Standard compliant • Mobile-ready • No errors on missing wallets</p>
+        </div>
+    </div>
+
+    <script src="wallet-adapter.js"></script>
+    <script>
+        const adapter = new WalletAdapter();
+        const messageContainer = document.getElementById('message-container');
+
+        // Initialize
+        function init() {
+            const wallets = adapter.detectWallets();
+            updateUI();
+            setButtonListeners();
+
+            // Show detected wallets
+            if (wallets.length === 0) {
+                showMessage('No wallet detected. Install Phantom, Solflare, or Backpack to continue.', 'info');
+            } else {
+                showMessage('Detected: ' + wallets.join(', '), 'success');
+            }
+        }
+
+        function updateUI() {
+            const status = adapter.getStatus();
+            const wallets = adapter.getDetectedWallets();
+
+            // Update status
+            document.getElementById('status').textContent = status.connected ? '✓ Connected' : '✗ Disconnected';
+            document.getElementById('publicKey').textContent = status.publicKey ? status.publicKey.substring(0, 20) + '...' : 'None';
+            document.getElementById('detectedWallets').textContent = wallets.length > 0 ? wallets.join(', ') : 'None';
+
+            // Enable/disable buttons based on detected wallets
+            const { phantom, solflare, backpack } = adapter.wallets;
+            document.getElementById('phantom-btn').disabled = !phantom;
+            document.getElementById('solflare-btn').disabled = !solflare;
+            document.getElementById('backpack-btn').disabled = !backpack;
+
+            // Enable/disable action buttons
+            document.getElementById('sign-btn').disabled = !status.connected;
+            document.getElementById('disconnect-btn').disabled = !status.connected;
+        }
+
+        function setButtonListeners() {
+            document.getElementById('phantom-btn').addEventListener('click', () => connectWallet('phantom'));
+            document.getElementById('solflare-btn').addEventListener('click', () => connectWallet('solflare'));
+            document.getElementById('backpack-btn').addEventListener('click', () => connectWallet('backpack'));
+            document.getElementById('sign-btn').addEventListener('click', () => signMessage());
+            document.getElementById('disconnect-btn').addEventListener('click', () => disconnectWallet());
+
+            adapter.on('connect', (data) => {
+                showMessage('Connected to ' + data.wallet + '!', 'success');
+                updateUI();
+            });
+
+            adapter.on('disconnect', () => {
+                showMessage('Disconnected from wallet', 'info');
+                updateUI();
+            });
+        }
+
+        async function connectWallet(walletName) {
+            try {
+                await adapter['connect' + walletName.charAt(0).toUpperCase() + walletName.slice(1)]();
+            } catch (err) {
+                showMessage('Connection failed: ' + err.message, 'error');
+            }
+        }
+
+        async function disconnectWallet() {
+            try {
+                await adapter.disconnect();
+            } catch (err) {
+                showMessage('Disconnect failed: ' + err.message, 'error');
+            }
+        }
+
+        async function signMessage() {
+            try {
+                const signature = await adapter.signMessage('Hello from HolDex!');
+                showMessage('Signed! Signature: ' + signature.signature.substring(0, 20) + '...', 'success');
+            } catch (err) {
+                showMessage('Sign failed: ' + err.message, 'error');
+            }
+        }
+
+        function showMessage(msg, type) {
+            const div = document.createElement('div');
+            div.className = type === 'error' ? 'error-box' : type === 'success' ? 'message-box' : 'message-box';
+            div.textContent = msg;
+            while (messageContainer.firstChild) {
+                messageContainer.removeChild(messageContainer.firstChild);
+            }
+            messageContainer.appendChild(div);
+
+            setTimeout(() => {
+                if (messageContainer.contains(div)) {
+                    messageContainer.removeChild(div);
+                }
+            }, 5000);
+        }
+
+        // Start
+        init();
+    </script>
+</body>
+</html>

@@ -26,6 +26,7 @@ const webhooksRoutes = require('./routes/webhooks');
 const oracleRoutes = require('./routes/oracle');
 const spaceRoutes = require('./routes/space');
 const nodesRoutes = require('./routes/nodes');
+const txRoutes = require('./routes/tx');
 const nodeService = require('./services/nodeService');
 const { getOrCreateMasterWebhook } = require('./services/heliusWebhook');
 const brainReporter = require('./services/brainReporter');
@@ -539,6 +540,9 @@ async function startServer() {
 
         // Error Monitoring Routes (Phase 3 - error dashboards and metrics)
         app.use('/monitoring', monitoringRoutes);
+
+        // Transaction Monitoring Routes (Phase 4 - TX confirmation tracking)
+        app.use('/tx', txRoutes);
 
         // Initialize this node in the network
         await nodeService.initializeNode(getDB());

@@ -267,6 +267,20 @@ class RPCProvider {
         }
     }
 
+    /**
+     * Get transaction details by signature
+     */
+    async getTransaction(signature) {
+        return this.executeWithFallback('getTransaction', [signature]);
+    }
+
+    /**
+     * Get current slot/block height
+     */
+    async getSlot() {
+        return this.executeWithFallback('getSlot', []);
+    }
+
     // ============================================
     // UTILITY METHODS
     // ============================================

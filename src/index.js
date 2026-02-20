@@ -27,6 +27,7 @@ const oracleRoutes = require('./routes/oracle');
 const spaceRoutes = require('./routes/space');
 const nodesRoutes = require('./routes/nodes');
 const txRoutes = require('./routes/tx');
+const metricsRoutes = require('./routes/metrics');
 const nodeService = require('./services/nodeService');
 const { getOrCreateMasterWebhook } = require('./services/heliusWebhook');
 const brainReporter = require('./services/brainReporter');
@@ -543,6 +544,9 @@ async function startServer() {
 
         // Transaction Monitoring Routes (Phase 4 - TX confirmation tracking)
         app.use('/tx', txRoutes);
+
+        // RPC Metrics Routes (Phase 4 - credit monitoring and deduplication tracking)
+        app.use('/metrics', metricsRoutes);
 
         // Initialize this node in the network
         await nodeService.initializeNode(getDB());

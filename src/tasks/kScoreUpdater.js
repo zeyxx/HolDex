@@ -819,7 +819,10 @@ async function rateLimitedFetch(url, options = {}) {
 }
 
 async function heliusRpc(method, params) {
-    if (!HELIUS_API_KEY) return null;
+    if (!HELIUS_API_KEY || HELIUS_API_KEY.includes('placeholder')) {
+        logger.warn(`[Helius] Skipping RPC: Invalid/placeholder API key detected`);
+        return null;
+    }
 
     try {
         const response = await rateLimitedFetch(HELIUS_RPC_URL, {
@@ -828,6 +831,13 @@ async function heliusRpc(method, params) {
             body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params }),
         });
         const data = await response.json();
+
+        // CRITICAL: Detect 401 Unauthorized (invalid API key) and trigger circuit breaker
+        if (data.error && data.error.message && data.error.message.includes('invalid api key')) {
+            recordFailure(); // ← THIS IS THE FIX: Detect auth failures
+            throw new Error(`Authentication failed: ${data.error.message}`);
+        }
+
         if (data.error) throw new Error(data.error.message);
 
         // Track RPC call for HARDCAP enforcement

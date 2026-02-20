@@ -91,17 +91,17 @@ services:
     restart: always
     profiles: ["workers"]  # Only enabled if explicitly requested
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - SOLANA_RPC_URL=${SOLANA_RPC_URL}
-      - SOLANA_WSS_URL=${SOLANA_WSS_URL}
-      - HELIUS_API_KEY=${HELIUS_API_KEY}
+      - DATABASE_URL=postgres://holdex_user:secure_password_for_testing_12345678@db:5432/holdex_production
+      - REDIS_URL=redis://redis:6379
+      - SOLANA_RPC_URL=https://mainnet.helius-rpc.com/
+      - SOLANA_WSS_URL=wss://mainnet.helius-rpc.com/
+      - HELIUS_API_KEY=test_key_placeholder_replace_with_real
       - SERVICE_TYPE=calculator
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - RPC_HARDCAP_ENABLED=${RPC_HARDCAP_ENABLED:-true}
-      - RPC_MAX_CALLS_PER_HOUR=${RPC_MAX_CALLS_PER_HOUR:-500}
-      - NODE_ID=${NODE_ID:-calc-primary}
-      - USE_DISTRIBUTED_POLLING=${USE_DISTRIBUTED_POLLING:-false}
+      - LOG_LEVEL=info
+      - RPC_HARDCAP_ENABLED=true
+      - RPC_MAX_CALLS_PER_HOUR=500
+      - NODE_ID=calc-primary
+      - USE_DISTRIBUTED_POLLING=false
     depends_on:
       db:
         condition: service_healthy

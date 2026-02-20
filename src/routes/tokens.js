@@ -2820,7 +2820,8 @@ function init(deps) {
                 }
 
                 // SECURITY: Whitelist filter
-                let whereClause = 'WHERE volume24h > 0';
+                // DEV: Allow empty volume locally for testing
+                let whereClause = 'WHERE 1=1'; // Local development: show all tokens
                 if (filter === 'verified') {
                     whereClause += ' AND hasCommunityUpdate = TRUE';
                 }

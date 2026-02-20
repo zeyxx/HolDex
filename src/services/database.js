@@ -403,6 +403,10 @@ async function initDB() {
                     name TEXT NOT NULL,
                     operator TEXT NOT NULL,               -- Operator wallet address
 
+                    -- Node identity (cryptographic verification)
+                    node_public_key TEXT,                 -- Public key for signature verification
+                    node_key_fingerprint TEXT,            -- Fingerprint of node public key
+
                     -- Endpoints
                     api_url TEXT,                         -- Public API endpoint (optional)
                     region TEXT,                          -- Geographic region (us-west, eu-central, etc.)
@@ -419,6 +423,14 @@ async function initDB() {
                     -- Status
                     status TEXT DEFAULT 'pending',        -- pending | active | degraded | offline
                     version TEXT DEFAULT '1.0.0',         -- Node software version
+
+                    -- Node capabilities
+                    capabilities JSONB DEFAULT '["polling", "verification"]'::jsonb, -- Node features enabled
+
+                    -- Node approval system
+                    is_genesis BOOLEAN DEFAULT FALSE,     -- Is this a genesis node?
+                    approval_status TEXT DEFAULT 'pending', -- pending | approved | rejected
+                    approved_at BIGINT,                   -- Timestamp when approved (ms)
 
                     -- Timestamps
                     joined_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000,
@@ -564,6 +576,13 @@ async function initDB() {
                 // K-Score v10: Real holders tracking
                 `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS real_holders INTEGER DEFAULT 0`,
                 `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS total_holders INTEGER DEFAULT 0`,
+                // Node approval system: Add missing columns for genesis and approval tracking
+                `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_public_key TEXT`,
+                `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS node_key_fingerprint TEXT`,
+                `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS capabilities JSONB DEFAULT '["polling", "verification"]'::jsonb`,
+                `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS is_genesis BOOLEAN DEFAULT FALSE`,
+                `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'pending'`,
+                `ALTER TABLE nodes ADD COLUMN IF NOT EXISTS approved_at BIGINT`,
                 // Harmony: Fix operation_costs schema if old version exists
                 `ALTER TABLE operation_costs RENAME COLUMN operation TO operation_type`,
                 `ALTER TABLE operation_costs RENAME COLUMN infrastructure_cost TO actual_cost`,

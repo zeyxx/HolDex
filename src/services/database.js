@@ -25,16 +25,25 @@ async function initDB() {
                 throw new Error('DATABASE_URL is required - set it in .env or environment');
             }
 
-            const isLocal = config.DATABASE_URL.includes('localhost') || config.DATABASE_URL.includes('127.0.0.1');
+            // Detect local/dev environments (localhost, 127.0.0.1, Docker container names, dev hostnames)
+            const isLocal =
+                config.DATABASE_URL.includes('localhost') ||
+                config.DATABASE_URL.includes('127.0.0.1') ||
+                config.DATABASE_URL.includes('db:') ||           // Docker service name
+                config.DATABASE_URL.includes('postgres:') ||      // Alternative Docker name
+                config.DATABASE_URL.includes(':5432') ||          // Default port, usually dev
+                config.NODE_ENV !== 'production';                 // Assume dev if not production
 
             // SECURITY: SSL Configuration (H1)
             // In production, prefer SSL verification. Set DB_SSL_REJECT_UNAUTHORIZED=true for strict mode.
             // Default to false for Render's managed Postgres (uses internal certs)
+            // Default to false for dev/Docker environments (self-signed or no SSL)
             const strictSsl = process.env.DB_SSL_REJECT_UNAUTHORIZED === 'true';
             let sslConfig;
 
             if (isLocal) {
                 sslConfig = false;
+                logger.debug('🔓 Database: SSL disabled (local/dev environment detected)');
             } else {
                 sslConfig = { rejectUnauthorized: strictSsl };
                 if (!strictSsl && config.NODE_ENV === 'production') {

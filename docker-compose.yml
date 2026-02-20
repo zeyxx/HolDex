@@ -1,9 +1,13 @@
 version: '3.8'
 
+# Load environment variables from .env.local (not committed to git)
+# Create it by: cp .env.example .env.local && edit with your credentials
+# Docker Compose automatically loads .env.local if present in the directory
+
 services:
   # LOAD BALANCER (Entry Point)
   nginx:
-    image: nginx:latest
+    image: nginx:1.27-alpine  # Pinned to stable version
     ports:
       - "80:80"
     volumes:
@@ -12,74 +16,109 @@ services:
       - api
     networks:
       - holdex-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
-  # API SERVER (Scaled x 3)
+  # API SERVER (Primary service - can scale with --scale api=N)
   api:
     build: .
     restart: always
+    ports:
+      - "3000:3000"  # Expose for health checks (Nginx proxies in production)
     environment:
       - PORT=3000
-      - DATABASE_URL=postgres://user:password@db:5432/holdex
+      - NODE_ENV=development
+      - ADMIN_PASSWORD=test_admin_password_12345
+      - DATA_SIGNING_SECRET=test_signing_secret_67890
+      - DATABASE_URL=postgres://holdex_user:secure_password_for_testing_12345678@db:5432/holdex_production
       - REDIS_URL=redis://redis:6379
-      # Pass through RPC config if using .env file or environment injection
-      - SOLANA_RPC_URL=${SOLANA_RPC_URL}
-      - SOLANA_WSS_URL=${SOLANA_WSS_URL}
-      - HELIUS_API_KEY=${HELIUS_API_KEY}
+      - SOLANA_RPC_URL=https://mainnet.helius-rpc.com/
+      - SOLANA_WSS_URL=wss://mainnet.helius-rpc.com/
+      - HELIUS_API_KEY=test_key_placeholder_replace_with_real
+      - LOG_LEVEL=info
+      - RPC_HARDCAP_ENABLED=true
+      - RPC_MAX_CALLS_PER_HOUR=500
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     networks:
       - holdex-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
-  # WORKER (LEGACY - Background token queue processing)
-  # NOTE: Automatic token discovery is DISABLED. This worker processes
-  # tokens from the token_queue, but nothing pushes to that queue anymore.
-  # Tokens are only added via user CA search in the API.
-  # Consider removing this service if not needed.
+  # WORKER (LEGACY - DISABLED FOR NOW)
+  # Status: Automatic token discovery disabled. Nothing pushes to token_queue.
+  # Tokens only added via user CA search in API. This service is NOT ACTIVE.
+  # To re-enable: Set COMPOSE_PROFILES=legacy in .env.local or run:
+  #   docker-compose --profile legacy up -d worker
+  # Remove this section entirely if confirmed not needed.
   worker:
     build: .
     command: node src/worker.js
     restart: always
+    profiles: ["legacy"]  # Hidden by default, requires explicit profile flag
     environment:
-      - DATABASE_URL=postgres://user:password@db:5432/holdex
-      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
       - SOLANA_RPC_URL=${SOLANA_RPC_URL}
       - SOLANA_WSS_URL=${SOLANA_WSS_URL}
       - HELIUS_API_KEY=${HELIUS_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     networks:
       - holdex-network
 
-  # LISTENER (K-Score Analysis Engine)
-  # NOTE: Automatic token discovery is DISABLED. This worker only runs
-  # K-Score analysis loop for existing tokens. See listener_worker.js.
-  listener:
+  # CALCULATOR (K-Score Analysis Engine)
+  # K-Score calculation for all tracked tokens via src/calculator.js
+  # Phase 4: RPC credit leak detection runs here. CRITICAL for cost control.
+  # Enable with: docker-compose --profile workers up -d calculator
+  calculator:
     build: .
-    command: node src/listener_worker.js
+    command: node src/calculator.js
     restart: always
+    profiles: ["workers"]  # Only enabled if explicitly requested
     environment:
-      - DATABASE_URL=postgres://user:password@db:5432/holdex
-      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
       - SOLANA_RPC_URL=${SOLANA_RPC_URL}
       - SOLANA_WSS_URL=${SOLANA_WSS_URL}
       - HELIUS_API_KEY=${HELIUS_API_KEY}
-      - SERVICE_TYPE=listener
+      - SERVICE_TYPE=calculator
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - RPC_HARDCAP_ENABLED=${RPC_HARDCAP_ENABLED:-true}
+      - RPC_MAX_CALLS_PER_HOUR=${RPC_MAX_CALLS_PER_HOUR:-500}
+      - NODE_ID=${NODE_ID:-calc-primary}
+      - USE_DISTRIBUTED_POLLING=${USE_DISTRIBUTED_POLLING:-false}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     networks:
       - holdex-network
 
-  # TIMESCALE DB (Replaces Standard Postgres)
+  # TIMESCALE DB (PostgreSQL + TimescaleDB extension for hypertables)
   db:
-    image: timescale/timescaledb:latest-pg15
+    image: postgres:16-alpine  # Using local image (timescale not available)
     restart: always
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: holdex
+      POSTGRES_USER: holdex_user
+      POSTGRES_PASSWORD: secure_password_for_testing_12345678
+      POSTGRES_DB: holdex_production
+      POSTGRES_INITDB_ARGS: "-c log_statement=mod"  # Log only DML (not SELECT)
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -87,19 +126,28 @@ services:
     networks:
       - holdex-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d holdex"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
-  # REDIS (Message Broker)
+  # REDIS (Message Broker & Session Cache)
   redis:
-    image: redis:alpine
+    image: redis:7.2-alpine  # Pinned to stable version
     restart: always
+    command: redis-server --appendonly yes  # Enable AOF persistence
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     networks:
       - holdex-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
 networks:
   holdex-network:
@@ -107,3 +155,4 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:

@@ -34,6 +34,18 @@ const { tokenExists } = require('../services/database');
  * IMPORTANT: This is the FIRST line of defense against credit drain.
  * Even legitimate Helius webhooks can flood if misconfigured.
  */
+// Normalize IP addresses (including IPv6) for express-rate-limit compatibility
+const normalizeIp = (ip) => {
+    if (!ip) return 'unknown';
+    // Map IPv6 localhost to IPv4 for consistency
+    if (ip === '::1' || ip === '::ffff:127.0.0.1') return '127.0.0.1';
+    // Remove IPv6 zone ID (e.g., %eth0)
+    if (ip.includes('%')) return ip.split('%')[0];
+    // Map IPv6-mapped IPv4 addresses (::ffff:x.x.x.x) to IPv4
+    if (ip.startsWith('::ffff:')) return ip.slice(7);
+    return ip;
+};
+
 const webhookRateLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute window
     max: 100,            // 100 requests per minute per IP
@@ -42,9 +54,10 @@ const webhookRateLimiter = rateLimit({
     skipSuccessfulRequests: false, // Count ALL requests
     keyGenerator: (req) => {
         // Trust X-Forwarded-For from Helius (behind their load balancer)
-        return req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-               req.ip ||
-               'unknown';
+        const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+                   req.ip ||
+                   'unknown';
+        return normalizeIp(ip);
     },
     handler: (req, res) => {
         logger.warn(`⚠️  Webhook rate limit exceeded: ${req.ip}`);

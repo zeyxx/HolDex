@@ -1,28 +1,28 @@
-# Use a lightweight Node.js version
+# Use a lightweight Node.js version (pinned for reproducibility)
 FROM node:18-alpine
 
 # Create app directory
 WORKDIR /usr/src/app
 
-# Create data directory for persistence
-# This is crucial for SQLite to survive restarts
-RUN mkdir -p ./data
+# Create non-root user for security (prevent privilege escalation)
+RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 
 # Copy package files first to leverage Docker layer caching
-COPY package*.json ./
+COPY --chown=nodejs:nodejs package*.json ./
 
 # Install production dependencies only to keep image small
-RUN npm install --only=production
+# Use 'npm ci' for deterministic installs (respects package-lock.json)
+# Use '--omit=dev' (npm 8+) instead of deprecated '--only=production'
+RUN npm ci --omit=dev
 
 # Copy the rest of the application source code
-COPY . .
+COPY --chown=nodejs:nodejs . .
+
+# Switch to non-root user
+USER nodejs
 
 # Expose the API port
 EXPOSE 3000
-
-# Define a volume for the data directory
-# This ensures data persists if the container is stopped/removed
-VOLUME ["/usr/src/app/data"]
 
 # Define command to run the app
 CMD [ "npm", "start" ]

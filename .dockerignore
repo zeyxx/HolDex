@@ -1,0 +1,72 @@
+# Git metadata (don't copy into image)
+.git
+.gitignore
+.gitmodules
+
+# Node modules (rebuilt in container)
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Environment files (secrets, local config)
+.env
+.env.local
+.env.*.local
+
+# Development files
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Test files (not needed in production)
+tests/
+test/
+*.test.js
+jest.config.js
+coverage/
+.coverage
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Docker (don't include in build)
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# Documentation
+README.md
+DOCS/
+docs/
+*.md
+
+# Build artifacts
+dist/
+build/
+out/
+
+# IDE files
+*.iml
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# OS temp files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Optional npm cache
+.npm
+.eslintcache

@@ -5,7 +5,8 @@ const { getClient } = require('./redis');
 // We require this dynamically inside functions if needed to avoid circular deps,
 // or pass it in. For aggregateAndSaveToken, we need it.
 const { getHolderCountFromRPC } = require('./solana');
-const { signMarket, signKScore } = require('../utils/dataSignature'); 
+const { signMarket, signKScore } = require('../utils/dataSignature');
+const { Errors, isCacheError } = require('../utils/errors'); 
 
 let primaryPool = null;
 let readPool = null; 
@@ -931,11 +932,36 @@ function getDB() { if (!dbWrapper) throw new Error("Database not initialized.");
 
 async function smartCache(key, ttlSeconds, fetchFn) {
     const redis = getClient();
-    if (redis) { try { const cached = await redis.get(key); if (cached) return JSON.parse(cached); } catch (_e) { /* ignore */ } }
+    if (redis) {
+        try {
+            const cached = await redis.get(key);
+            if (cached) return JSON.parse(cached);
+        } catch (_e) {
+            // Cache read failure - fall through to fetch
+        }
+    }
+
     if (pendingRequests.has(key)) return pendingRequests.get(key);
+
     const fetchPromise = (async () => {
-        try { const data = await fetchFn(); if (redis && data) redis.set(key, JSON.stringify(data), 'EX', ttlSeconds).catch(() => {}); return data; } finally { pendingRequests.delete(key); }
+        try {
+            const data = await fetchFn();
+            if (redis && data) {
+                // Cache the result with typed error handling
+                try {
+                    await redis.set(key, JSON.stringify(data), 'EX', ttlSeconds);
+                } catch (err) {
+                    const cacheErr = Errors.cacheSet(key, ttlSeconds);
+                    logger.warn(`[Database] ${cacheErr.message}`);
+                    // Non-blocking: cache failure doesn't prevent returning data
+                }
+            }
+            return data;
+        } finally {
+            pendingRequests.delete(key);
+        }
     })();
+
     pendingRequests.set(key, fetchPromise);
     return fetchPromise;
 }
@@ -1293,11 +1319,22 @@ async function tokenExists(mint) {
         // Cache the result in Redis
         if (redis) {
             if (exists) {
-                redis.sadd(KNOWN_MINTS_KEY, mint).catch(() => {});
+                // Add to known mints set (async, non-blocking)
+                redis.sadd(KNOWN_MINTS_KEY, mint).catch(err => {
+                    const mintErr = Errors.mintRegistry('sadd', mint);
+                    logger.warn(`[Database] ${mintErr.message}`);
+                });
             } else {
                 // Negative cache with TTL to avoid repeated misses
-                redis.sadd(UNKNOWN_MINTS_KEY, mint).catch(() => {});
-                redis.expire(UNKNOWN_MINTS_KEY, UNKNOWN_MINT_TTL).catch(() => {});
+                redis.sadd(UNKNOWN_MINTS_KEY, mint).catch(err => {
+                    const mintErr = Errors.mintRegistry('sadd', mint);
+                    logger.warn(`[Database] ${mintErr.message} (negative cache)`);
+                });
+
+                redis.expire(UNKNOWN_MINTS_KEY, UNKNOWN_MINT_TTL).catch(err => {
+                    const mintErr = Errors.mintRegistry('expire', UNKNOWN_MINTS_KEY);
+                    logger.warn(`[Database] ${mintErr.message}`);
+                });
             }
         }
 

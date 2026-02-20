@@ -17,6 +17,7 @@ const { PublicKey } = require('@solana/web3.js');
 const config = require('../config/env');
 const logger = require('./logger');
 const { getClient } = require('./redis');
+const { Errors, isCacheError } = require('../utils/errors');
 
 // $ASDFASDFA token mint
 const ASDF_MINT = config.FEE_TOKEN_MINT || '9zB5wRarXMj86MymwLumSKA1Dx35zPqqKfcZtK1Spump';
@@ -121,7 +122,10 @@ async function getWalletBalance(connection, walletAddress) {
 
         // Cache result (with LRU eviction for memory cache)
         if (redis) {
-            redis.set(cacheKey, balance.toString(), { EX: HOLDINGS_CACHE_TTL }).catch(() => {});
+            redis.set(cacheKey, balance.toString(), { EX: HOLDINGS_CACHE_TTL }).catch(err => {
+                const cacheErr = Errors.cacheSet(cacheKey, HOLDINGS_CACHE_TTL);
+                logger.warn(`[BurnCredits] ${cacheErr.message}`);
+            });
         }
         evictOldestMemoryEntries();
         memoryCache.set(cacheKey, { balance, ts: Date.now() });
@@ -401,7 +405,10 @@ function invalidateCache(walletAddress) {
     // Clear Redis cache
     const redis = getClient();
     if (redis) {
-        redis.del(`holdings:${walletAddress}`).catch(() => {});
+        redis.del(`holdings:${walletAddress}`).catch(err => {
+            const cacheErr = Errors.cacheInvalidation(`holdings:${walletAddress}`);
+            logger.warn(`[BurnCredits] ${cacheErr.message}`);
+        });
     }
 }
 

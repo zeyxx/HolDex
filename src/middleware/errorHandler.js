@@ -14,6 +14,7 @@
 
 const logger = require('../services/logger');
 const { isHolDexError, toHttpResponse } = require('../utils/errors');
+const { trackErrorMetricToDB, getErrorMetricsFromDB, resetErrorMetricsDB } = require('../services/database');
 
 /**
  * Error status code mapping
@@ -165,35 +166,32 @@ function asyncHandler(fn) {
  * @param {Error} err
  * @param {string} endpoint
  */
-function trackErrorMetric(err, endpoint) {
+async function trackErrorMetric(err, endpoint) {
     if (!isHolDexError(err)) return;
 
     const errorType = err.code || 'unknown';
     const severity = err.severity || 'error';
 
-    // Store for dashboards (in-memory for now, will move to DB in Phase 3.2)
-    if (!global._errorMetrics) {
-        global._errorMetrics = {};
+    // Persist to database (Phase 3.2)
+    try {
+        await trackErrorMetricToDB(errorType, severity);
+    } catch (e) {
+        logger.warn(`[ErrorHandler] Failed to persist error metric: ${e.message}`);
     }
-    if (!global._errorMetrics[errorType]) {
-        global._errorMetrics[errorType] = { count: 0, lastOccurrence: null, severity };
-    }
-    global._errorMetrics[errorType].count++;
-    global._errorMetrics[errorType].lastOccurrence = new Date().toISOString();
 }
 
 /**
  * Get error metrics for dashboard
  */
-function getErrorMetrics() {
-    return global._errorMetrics || {};
+async function getErrorMetrics() {
+    return await getErrorMetricsFromDB();
 }
 
 /**
  * Reset error metrics (for testing)
  */
-function resetErrorMetrics() {
-    global._errorMetrics = {};
+async function resetErrorMetrics() {
+    await resetErrorMetricsDB();
 }
 
 module.exports = {

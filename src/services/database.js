@@ -512,6 +512,18 @@ async function initDB() {
                     true_negatives      INTEGER DEFAULT 0,
                     false_negatives     INTEGER DEFAULT 0
                 );
+
+                -- ═══════════════════════════════════════════════════════════
+                -- ERROR METRICS: Phase 3.2 Persistence Layer
+                -- Persists error metrics to database for observability dashboards
+                -- ═══════════════════════════════════════════════════════════
+                CREATE TABLE IF NOT EXISTS error_metrics (
+                    error_code          TEXT PRIMARY KEY,
+                    count               INTEGER DEFAULT 0,
+                    severity            TEXT NOT NULL,
+                    first_occurrence    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_occurrence     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
             `);
 
             // Add new columns if they don't exist (migration-safe)
@@ -760,6 +772,13 @@ async function initDB() {
                 `CREATE INDEX IF NOT EXISTS idx_watchlist_mint ON user_watchlists (mint)`,
                 // Alert queries (for background worker)
                 `CREATE INDEX IF NOT EXISTS idx_watchlist_alerts ON user_watchlists (alert_threshold) WHERE alert_threshold IS NOT NULL`,
+                // ═══════════════════════════════════════════════════════════
+                // ERROR METRICS INDEXES
+                // ═══════════════════════════════════════════════════════════
+                // Error severity filtering (for dashboard)
+                `CREATE INDEX IF NOT EXISTS idx_error_metrics_severity ON error_metrics (severity)`,
+                // Recent errors (for monitoring)
+                `CREATE INDEX IF NOT EXISTS idx_error_metrics_last_occurrence ON error_metrics (last_occurrence DESC)`,
                 // ═══════════════════════════════════════════════════════════
                 // SIGNAL ACCUMULATOR INDEXES (17-Dimension Pre-Judgment)
                 // ═══════════════════════════════════════════════════════════
@@ -1415,6 +1434,153 @@ async function preloadKnownMintsCache() {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// ERROR METRICS PERSISTENCE (Phase 3.2)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Track error metric to database
+ * @param {string} errorCode - The typed error code
+ * @param {string} severity - The severity level (error, warn, critical)
+ * @returns {Promise<void>}
+ */
+async function trackErrorMetricToDB(errorCode, severity) {
+    const db = getDB();
+    if (!db) return;
+
+    try {
+        await db.run(`
+            INSERT INTO error_metrics (error_code, count, severity, first_occurrence, last_occurrence)
+            VALUES ($1, 1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (error_code) DO UPDATE SET
+                count = count + 1,
+                last_occurrence = CURRENT_TIMESTAMP
+        `, [errorCode, severity]);
+    } catch (err) {
+        logger.warn(`Failed to persist error metric ${errorCode}: ${err.message}`);
+    }
+}
+
+/**
+ * Get all error metrics from database
+ * @returns {Promise<Object>} - Map of error codes to metrics
+ */
+async function getErrorMetricsFromDB() {
+    const db = getDB();
+    if (!db) return {};
+
+    try {
+        const rows = await db.all(`
+            SELECT error_code, count, severity, first_occurrence, last_occurrence
+            FROM error_metrics
+            ORDER BY last_occurrence DESC
+        `);
+
+        const metricsMap = {};
+        for (const row of rows) {
+            metricsMap[row.error_code] = {
+                count: row.count,
+                severity: row.severity,
+                firstOccurrence: row.first_occurrence,
+                lastOccurrence: row.last_occurrence
+            };
+        }
+        return metricsMap;
+    } catch (err) {
+        logger.warn(`Failed to retrieve error metrics: ${err.message}`);
+        return {};
+    }
+}
+
+/**
+ * Get metrics for a specific error code
+ * @param {string} errorCode - The error code to look up
+ * @returns {Promise<Object|null>} - Metric details or null if not found
+ */
+async function getErrorMetricByCode(errorCode) {
+    const db = getDB();
+    if (!db) return null;
+
+    try {
+        const row = await db.get(`
+            SELECT error_code, count, severity, first_occurrence, last_occurrence
+            FROM error_metrics
+            WHERE error_code = $1
+        `, [errorCode]);
+
+        if (!row) return null;
+
+        return {
+            error_code: row.error_code,
+            count: row.count,
+            severity: row.severity,
+            first_occurrence: row.first_occurrence,
+            last_occurrence: row.last_occurrence
+        };
+    } catch (err) {
+        logger.warn(`Failed to retrieve error metric for ${errorCode}: ${err.message}`);
+        return null;
+    }
+}
+
+/**
+ * Get error metrics summary (by severity)
+ * @returns {Promise<Object>} - Summary with counts by severity
+ */
+async function getErrorMetricsSummary() {
+    const db = getDB();
+    if (!db) return { totalErrors: 0, bySeverity: {}, byErrorType: 0 };
+
+    try {
+        // Total error count
+        const totalRow = await db.get(`
+            SELECT SUM(count) as total FROM error_metrics
+        `);
+        const totalErrors = totalRow?.total || 0;
+
+        // Count by severity
+        const severityRows = await db.all(`
+            SELECT severity, SUM(count) as count
+            FROM error_metrics
+            GROUP BY severity
+        `);
+        const bySeverity = {};
+        for (const row of severityRows) {
+            bySeverity[row.severity] = row.count;
+        }
+
+        // Count of unique error types
+        const uniqueRow = await db.get(`
+            SELECT COUNT(*) as count FROM error_metrics
+        `);
+        const byErrorType = uniqueRow?.count || 0;
+
+        return {
+            totalErrors,
+            bySeverity,
+            byErrorType
+        };
+    } catch (err) {
+        logger.warn(`Failed to retrieve error metrics summary: ${err.message}`);
+        return { totalErrors: 0, bySeverity: {}, byErrorType: 0 };
+    }
+}
+
+/**
+ * Reset error metrics (for testing)
+ * @returns {Promise<void>}
+ */
+async function resetErrorMetricsDB() {
+    const db = getDB();
+    if (!db) return;
+
+    try {
+        await db.run('DELETE FROM error_metrics');
+    } catch (err) {
+        logger.warn(`Failed to reset error metrics: ${err.message}`);
+    }
+}
+
 module.exports = {
     initDB,
     getDB,
@@ -1432,5 +1598,11 @@ module.exports = {
     tokenExists,
     cacheKnownToken,
     cacheKnownTokens,
-    preloadKnownMintsCache
+    preloadKnownMintsCache,
+    // Error metrics persistence (Phase 3.2)
+    trackErrorMetricToDB,
+    getErrorMetricsFromDB,
+    getErrorMetricByCode,
+    getErrorMetricsSummary,
+    resetErrorMetricsDB
 };

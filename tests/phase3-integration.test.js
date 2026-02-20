@@ -12,6 +12,30 @@ const assert = require('assert');
 const { errorHandler, getErrorMetrics, resetErrorMetrics, STATUS_CODE_MAP } = require('../src/middleware/errorHandler');
 const { Errors } = require('../src/utils/errors');
 
+// Mock database to store metrics in-memory for testing
+const mockMetricsStore = {};
+const mockDatabase = {
+    trackErrorMetricToDB: async (errorCode, severity) => {
+        if (!mockMetricsStore[errorCode]) {
+            mockMetricsStore[errorCode] = {
+                error_code: errorCode,
+                count: 0,
+                severity,
+                first_occurrence: new Date(),
+                last_occurrence: new Date()
+            };
+        }
+        mockMetricsStore[errorCode].count++;
+        mockMetricsStore[errorCode].last_occurrence = new Date();
+    },
+    getErrorMetricsFromDB: async () => mockMetricsStore,
+    resetErrorMetricsDB: async () => { Object.keys(mockMetricsStore).forEach(k => delete mockMetricsStore[k]); },
+    getErrorMetricByCode: async (code) => mockMetricsStore[code] || null,
+};
+
+// Override the database module with our mock
+require.cache[require.resolve('../src/services/database')].exports = mockDatabase;
+
 console.log('\n' + '='.repeat(70));
 console.log('PHASE 3 INTEGRATION TESTS — Error Handler + Monitoring');
 console.log('Focus: Verify typed errors convert to HTTP responses');

@@ -11,14 +11,15 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
 const { getErrorMetrics } = require('../middleware/errorHandler');
+const { getErrorMetricByCode } = require('../services/database');
 
 /**
  * GET /monitoring/errors
  * Returns error metrics for dashboard
  */
-router.get('/errors', (req, res) => {
+router.get('/errors', async (req, res) => {
     try {
-        const metrics = getErrorMetrics();
+        const metrics = await getErrorMetrics();
 
         // Calculate error rates
         const errorsByType = {};
@@ -28,6 +29,7 @@ router.get('/errors', (req, res) => {
             errorsByType[errorCode] = {
                 count: data.count,
                 severity: data.severity,
+                firstOccurrence: data.firstOccurrence,
                 lastOccurrence: data.lastOccurrence,
             };
             totalErrors += data.count;
@@ -77,11 +79,10 @@ router.get('/errors', (req, res) => {
  * GET /monitoring/errors/:code
  * Returns details for a specific error code
  */
-router.get('/errors/:code', (req, res) => {
+router.get('/errors/:code', async (req, res) => {
     try {
         const { code } = req.params;
-        const metrics = getErrorMetrics();
-        const errorData = metrics[code];
+        const errorData = await getErrorMetricByCode(code);
 
         if (!errorData) {
             return res.status(404).json({
@@ -109,9 +110,9 @@ router.get('/errors/:code', (req, res) => {
  * GET /monitoring/health
  * System health check
  */
-router.get('/health', (req, res) => {
+router.get('/health', async (req, res) => {
     try {
-        const metrics = getErrorMetrics();
+        const metrics = await getErrorMetrics();
         let status = 'healthy';
         let issues = [];
 

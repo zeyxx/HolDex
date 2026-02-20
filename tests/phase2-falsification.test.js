@@ -164,7 +164,7 @@ const testWalletAndTransactionErrors = () => {
     try {
         throw Errors.replayAttack('webhook_event_sig', { timestamp: Date.now() });
     } catch (err) {
-        assert.strictEqual(err.code, 'SECURITY_REPLAY_ATTACK', 'Replay attack code correct');
+        assert.strictEqual(err.code, 'REPLAY_ATTACK_DETECTED', 'Replay attack code correct');
         assert.strictEqual(err.severity, 'critical', 'Replay attack is critical');
         assert(!err.recoverable, 'Replay attack not recoverable');
         console.log('  ✓ ReplayAttackError: security severity, not recoverable');
@@ -183,7 +183,7 @@ const testWalletAndTransactionErrors = () => {
     try {
         throw Errors.mintRegistry('sadd', 'Connection refused');
     } catch (err) {
-        assert.strictEqual(err.code, 'REGISTRY_OPERATION_FAILED', 'Mint registry code correct');
+        assert.strictEqual(err.code, 'MINT_REGISTRY_ERROR', 'Mint registry code correct');
         assert(err.recoverable, 'Mint registry errors are recoverable');
         console.log('  ✓ MintRegistryError: operation tracked, recoverable');
     }

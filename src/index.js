@@ -29,6 +29,8 @@ const nodesRoutes = require('./routes/nodes');
 const nodeService = require('./services/nodeService');
 const { getOrCreateMasterWebhook } = require('./services/heliusWebhook');
 const brainReporter = require('./services/brainReporter');
+const { errorHandler, asyncHandler } = require('./middleware/errorHandler');
+const monitoringRoutes = require('./routes/monitoring');
 const fs = require('fs');
 const path = require('path');
 
@@ -535,6 +537,9 @@ async function startServer() {
         app.use('/api/nodes', nodesRoutes);
         app.use('/internal', nodesRoutes.internalRouter);
 
+        // Error Monitoring Routes (Phase 3 - error dashboards and metrics)
+        app.use('/monitoring', monitoringRoutes);
+
         // Initialize this node in the network
         await nodeService.initializeNode(getDB());
 
@@ -547,13 +552,11 @@ async function startServer() {
         // Send initial heartbeat
         await nodeService.sendHeartbeat(getDB());
 
-        app.use((err, req, res, _next) => {
+        // Error Handler Middleware (Phase 3 - converts typed errors to HTTP responses)
+        // Must be registered LAST, after all other middleware and routes
+        app.use((err, req, res, next) => {
             brainReporter.recordError();
-            logger.error(`🔥 Unhandled Server Error: ${err.message}`);
-            logger.error(err.stack);
-            if (!res.headersSent) {
-                res.status(500).json({ success: false, error: 'Internal Server Error' });
-            }
+            errorHandler(err, req, res, next);
         });
 
         // Log HARDCAP configuration

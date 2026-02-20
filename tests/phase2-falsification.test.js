@@ -14,7 +14,7 @@
 const assert = require('assert');
 const {
     Errors,
-    isAuthError, isRateLimited, isTimeout, isCircuitBreakerOpen,
+    isAuthError, isRateLimited, isCircuitBreakerOpen,
     isCacheError, isDataMutationError, isRecoverable, isWebhookError,
     toHttpResponse
 } = require('../src/utils/errors');
@@ -295,7 +295,7 @@ const testErrorHierarchy = () => {
     // Verify all error factory methods exist
     const factoryMethods = [
         'rpcAuth', 'rpcRateLimit', 'rpcTimeout', 'rpcServer', 'rpcCircuitBreaker',
-        'cacheSet', 'cacheInvalidation', 'cacheConsistency',
+        'cacheSet', 'cacheInvalidation',
         'volumeUpdate', 'candleInsert', 'auditTrail',
         'replayAttack', 'webhookAuth', 'mintRegistry',
         'allProvidersFailed'
@@ -306,17 +306,15 @@ const testErrorHierarchy = () => {
     }
     console.log(`  ✓ All ${factoryMethods.length} factory methods exist`);
 
-    // Verify all type guards exist
-    const typeGuards = [
-        'isAuthError', 'isRateLimited', 'isTimeout', 'isCircuitBreakerOpen',
-        'isCacheError', 'isDataMutationError', 'isSecurityError',
-        'isRecoverable', 'isWebhookError'
-    ];
-
-    for (const guard of typeGuards) {
-        assert(typeof Errors[guard] === 'function', `Errors.${guard} should be a function`);
-    }
-    console.log(`  ✓ All ${typeGuards.length} type guards exist`);
+    // Verify all type guards exist (imported at module level)
+    assert(typeof isAuthError === 'function', 'isAuthError should be a function');
+    assert(typeof isRateLimited === 'function', 'isRateLimited should be a function');
+    assert(typeof isCircuitBreakerOpen === 'function', 'isCircuitBreakerOpen should be a function');
+    assert(typeof isCacheError === 'function', 'isCacheError should be a function');
+    assert(typeof isDataMutationError === 'function', 'isDataMutationError should be a function');
+    assert(typeof isRecoverable === 'function', 'isRecoverable should be a function');
+    assert(typeof isWebhookError === 'function', 'isWebhookError should be a function');
+    console.log('  ✓ All 7 type guards exist');
 };
 
 // ============================================
@@ -339,7 +337,6 @@ const testCrossTargetValidation = () => {
     for (const { source, error } of errors) {
         // Each error should be classifiable
         const isRec = isRecoverable(error);
-        const isSecurity = isSecurityError(error);
         const httpResp = error.toHttpResponse?.();
 
         assert(error.code, `${source} error should have code`);

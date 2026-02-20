@@ -9,8 +9,6 @@
  */
 
 const assert = require('assert');
-const { errorHandler, getErrorMetrics, resetErrorMetrics, STATUS_CODE_MAP } = require('../src/middleware/errorHandler');
-const { Errors } = require('../src/utils/errors');
 
 // Mock database to store metrics in-memory for testing
 const mockMetricsStore = {};
@@ -21,20 +19,25 @@ const mockDatabase = {
                 error_code: errorCode,
                 count: 0,
                 severity,
-                first_occurrence: new Date(),
-                last_occurrence: new Date()
+                firstOccurrence: new Date(),
+                lastOccurrence: new Date()
             };
         }
         mockMetricsStore[errorCode].count++;
-        mockMetricsStore[errorCode].last_occurrence = new Date();
+        mockMetricsStore[errorCode].lastOccurrence = new Date();
     },
     getErrorMetricsFromDB: async () => mockMetricsStore,
     resetErrorMetricsDB: async () => { Object.keys(mockMetricsStore).forEach(k => delete mockMetricsStore[k]); },
     getErrorMetricByCode: async (code) => mockMetricsStore[code] || null,
 };
 
-// Override the database module with our mock
-require.cache[require.resolve('../src/services/database')].exports = mockDatabase;
+// Override the database module with our mock BEFORE requiring errorHandler
+require.cache[require.resolve('../src/services/database')] = {
+    exports: mockDatabase
+};
+
+const { errorHandler, getErrorMetrics, resetErrorMetrics, STATUS_CODE_MAP } = require('../src/middleware/errorHandler');
+const { Errors } = require('../src/utils/errors');
 
 console.log('\n' + '='.repeat(70));
 console.log('PHASE 3 INTEGRATION TESTS — Error Handler + Monitoring');
@@ -158,10 +161,11 @@ try {
 // TEST 3: ERROR METRICS TRACKING
 // ============================================
 console.log('\n✓ TEST 3: Error Metrics Tracking\n');
+(async () => {
 try {
     // Reset metrics
-    resetErrorMetrics();
-    let metrics = getErrorMetrics();
+    await resetErrorMetrics();
+    let metrics = await getErrorMetrics();
     assert.deepStrictEqual(metrics, {}, 'Metrics should be empty after reset');
     console.log('  ✓ Metrics reset successfully');
 
@@ -178,7 +182,7 @@ try {
         errorHandler(err, mockReq, mockRes, () => {});
     }
 
-    metrics = getErrorMetrics();
+    metrics = await getErrorMetrics();
     assert(metrics['RPC_RATE_LIMIT'], 'Should have RPC_RATE_LIMIT metric');
     assert.strictEqual(metrics['RPC_RATE_LIMIT'].count, 3, 'Should have count of 3');
     assert.strictEqual(metrics['RPC_RATE_LIMIT'].severity, 'error', 'Should have correct severity');
@@ -193,7 +197,7 @@ try {
     const volumeErr = Errors.volumeUpdate('pool', 'error');
     errorHandler(volumeErr, mockReq, mockRes, () => {});
 
-    metrics = getErrorMetrics();
+    metrics = await getErrorMetrics();
     assert(metrics['VOLUME_UPDATE_FAILED'], 'Should have VOLUME_UPDATE_FAILED metric');
     assert.strictEqual(metrics['VOLUME_UPDATE_FAILED'].count, 1, 'Should have count of 1');
     console.log('  ✓ Error metrics tracked for different error types');
@@ -204,13 +208,17 @@ try {
     console.error('✗ FAILED:', e.message);
     process.exit(1);
 }
+})();
 
 // ============================================
 // TEST 4: ERROR RESPONSE FORMAT
 // ============================================
 console.log('\n✓ TEST 4: Error Response Format\n');
+(async () => {
 try {
-    resetErrorMetrics();
+    await resetErrorMetrics();
+    // Give async reset operation time to complete
+    await new Promise(resolve => setImmediate(resolve));
 
     const mockReq = { method: 'POST', path: '/api/test', id: 'req-format-test' };
     const mockRes = {
@@ -242,6 +250,7 @@ try {
     console.error('✗ FAILED:', e.message);
     process.exit(1);
 }
+})();
 
 // ============================================
 // TEST 5: RECOVERY SEMANTICS

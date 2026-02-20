@@ -61,7 +61,25 @@ try {
 // TEST 3: ERROR HANDLER ASYNC COMPATIBILITY
 // ============================================
 console.log('\n✓ TEST 3: Error Handler Async Compatibility\n');
+(async () => {
 try {
+    // Mock the database before requiring errorHandler
+    const mockMetricsStore = {};
+    const mockDB = {
+        trackErrorMetricToDB: async (errorCode, severity) => {
+            if (!mockMetricsStore[errorCode]) {
+                mockMetricsStore[errorCode] = { error_code: errorCode, count: 0, severity };
+            }
+            mockMetricsStore[errorCode].count++;
+        },
+        getErrorMetricsFromDB: async () => mockMetricsStore,
+        resetErrorMetricsDB: async () => { Object.keys(mockMetricsStore).forEach(k => delete mockMetricsStore[k]); },
+        getErrorMetricByCode: async (code) => mockMetricsStore[code] || null,
+    };
+
+    // Override database module cache with mock
+    require.cache[require.resolve('../src/services/database')].exports = mockDB;
+
     const { errorHandler, getErrorMetrics, resetErrorMetrics } = require('../src/middleware/errorHandler');
 
     // Verify functions are async (return promises)
@@ -72,9 +90,16 @@ try {
     const metricsPromise = getErrorMetrics();
     assert(metricsPromise instanceof Promise, 'getErrorMetrics should return a Promise');
 
+    // Await it to verify it resolves
+    const metrics = await metricsPromise;
+    assert(typeof metrics === 'object', 'getErrorMetrics should resolve to an object');
+
     // Verify resetErrorMetrics returns a promise
     const resetPromise = resetErrorMetrics();
     assert(resetPromise instanceof Promise, 'resetErrorMetrics should return a Promise');
+
+    // Await it to verify it resolves
+    await resetPromise;
 
     console.log('  ✓ getErrorMetrics is async (returns Promise)');
     console.log('  ✓ resetErrorMetrics is async (returns Promise)');
@@ -84,6 +109,7 @@ try {
     console.error('✗ FAILED:', e.message);
     process.exit(1);
 }
+})();
 
 // ============================================
 // TEST 4: MONITORING ROUTES ASYNC

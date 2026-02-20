@@ -41,6 +41,7 @@ const { waitForRateLimit: waitForGlobalRateLimit } = require('../services/helius
 const { recordJudgmentOutcome } = require('../services/signalAccumulator');
 const { consumeCredits, rpcGate } = require('../services/rpcHardcap');
 const { SAMPLING, CACHE_TTL } = require('../services/rpcHarmony');
+const { Errors, isRateLimited, isAuthError, isCircuitBreakerOpen } = require('../utils/errors');
 
 // ============================================
 // HELIUS CONFIG
@@ -765,7 +766,7 @@ async function rateLimitedFetch(url, options = {}) {
 
     // Check circuit breaker before making request
     if (!checkCircuitBreaker()) {
-        throw new Error('Circuit breaker is open - API temporarily unavailable');
+        throw Errors.rpcCircuitBreaker('rateLimitedFetch', 'Helius');
     }
 
     const now = Date.now();
@@ -812,7 +813,7 @@ async function rateLimitedFetch(url, options = {}) {
         recordFailure();
 
         if (error.name === 'AbortError') {
-            throw new Error(`Request timeout after ${API_TIMEOUT_MS}ms`);
+            throw Errors.rpcTimeout('heliusRpc', API_TIMEOUT_MS);
         }
         throw error;
     }
@@ -820,7 +821,8 @@ async function rateLimitedFetch(url, options = {}) {
 
 async function heliusRpc(method, params) {
     if (!HELIUS_API_KEY || HELIUS_API_KEY.includes('placeholder')) {
-        logger.warn(`[Helius] Skipping RPC: Invalid/placeholder API key detected`);
+        const err = Errors.missingApiKey('Helius');
+        logger.warn(`[Helius] Skipping RPC: ${err.message}`);
         return null;
     }
 
@@ -835,20 +837,52 @@ async function heliusRpc(method, params) {
         // CRITICAL: Detect 401 Unauthorized (invalid API key) and trigger circuit breaker
         if (data.error && data.error.message && data.error.message.includes('invalid api key')) {
             recordFailure(); // ← THIS IS THE FIX: Detect auth failures
-            throw new Error(`Authentication failed: ${data.error.message}`);
+            throw Errors.rpcAuth(method);
         }
 
-        if (data.error) throw new Error(data.error.message);
+        // Detect rate limit (429)
+        if (data.error && data.error.code === 429) {
+            throw Errors.rpcRateLimit(method, 60000, rateLimitRemaining);
+        }
+
+        // Handle other RPC errors (5xx, timeouts, etc.)
+        if (data.error) {
+            const statusCode = data.error.code || 500;
+            if (statusCode >= 500) {
+                throw Errors.rpcServer(method, statusCode, data.error.message);
+            }
+            throw Errors.rpcMethodFailed(method, statusCode, data.error.message);
+        }
 
         // Track RPC call for HARDCAP enforcement
         const creditCost = rpcMonitor.getCreditCost(method);
-        consumeCredits(method, creditCost).catch(() => {});
+        try {
+            await consumeCredits(method, creditCost);
+        } catch (err) {
+            logger.warn(`[Helius] Credit tracking failed: ${err.message}`);
+            // Non-blocking - don't fail the RPC call if credit tracking fails
+        }
+
         // Also track in legacy monitor for backward compatibility
-        rpcMonitor.trackRpcCall(method, creditCost).catch(() => {});
+        try {
+            await rpcMonitor.trackRpcCall(method, creditCost);
+        } catch (err) {
+            logger.warn(`[Helius] Legacy RPC monitor tracking failed: ${err.message}`);
+            // Non-blocking
+        }
 
         return data.result;
     } catch (error) {
-        logger.error(`[Helius] RPC error: ${error.message}`);
+        // Log detailed error with type information
+        if (isAuthError(error)) {
+            logger.error(`[Helius] AUTH ERROR: ${error.message}`);
+        } else if (isRateLimited(error)) {
+            logger.warn(`[Helius] RATE LIMITED: ${error.message}`);
+        } else if (isCircuitBreakerOpen(error)) {
+            logger.error(`[Helius] CIRCUIT BREAKER: ${error.message}`);
+        } else {
+            logger.error(`[Helius] RPC error (${error.code || 'UNKNOWN'}): ${error.message}`);
+        }
         return null;
     }
 }

@@ -1,10 +1,11 @@
 const { PublicKey } = require('@solana/web3.js');
-const { getSolanaConnection, retryRPC } = require('../../services/solana'); 
+const { getSolanaConnection, retryRPC } = require('../../services/solana');
 const { getDB, aggregateAndSaveToken } = require('../../services/database');
 const { getClient: _getClient } = require('../../services/redis');
 const logger = require('../../services/logger');
 const { getRealVolume } = require('../services/volume_tracker');
 const { enrichPoolsWithReserves } = require('../../services/pool_finder');
+const { Errors, isDataMutationError } = require('../../utils/errors');
 
 // MEMORY LEAK FIX: We will prune this cache periodically
 const stateCache = new Map();
@@ -208,12 +209,12 @@ async function processPoolBatch(db, connection, pools, _redis) {
         // --- VOLUME TRACKING (ASYNC) ---
         const volKey = `vol_last_check:${p.address}`;
         const lastCheck = stateCache.get(volKey) || 0;
-        
-        if (now - lastCheck > 120000) { 
+
+        if (now - lastCheck > 120000) {
             stateCache.set(volKey, now);
             const sigKey = `vol_sig:${p.address}`;
             const lastSig = stateCache.get(sigKey);
-            
+
             getRealVolume(p.address, lastSig, solPriceCache).then(volData => {
                 if (volData.txCount > 0) {
                     stateCache.set(sigKey, volData.latestSignature);
@@ -221,18 +222,35 @@ async function processPoolBatch(db, connection, pools, _redis) {
                     if (volData.volumeUsd > 0) {
                         // FIX: Use Math.floor() for volume to ensure integer values
                         const flooredVolume = Math.floor(volData.volumeUsd);
-                        db.query(`UPDATE pools SET volume_24h = volume_24h + $1 WHERE address = $2`, [flooredVolume, p.address]).catch(() => {});
+
+                        // VOLUME UPDATE: Now tracked with typed error
+                        db.query(`UPDATE pools SET volume_24h = volume_24h + $1 WHERE address = $2`, [flooredVolume, p.address])
+                            .catch(err => {
+                                const typedErr = Errors.volumeUpdate(p.address, err.message);
+                                logger.warn(`[Snapshotter] ${typedErr.message}`);
+                                // Non-blocking: volume tracking failure shouldn't stop the cycle
+                            });
 
                         const bucket = Math.floor(Date.now() / 60000) * 60000;
+
+                        // CANDLE INSERT: Now tracked with typed error
                         db.query(`
                             INSERT INTO candles_1m (pool_address, timestamp, open, high, low, close, volume)
                             VALUES ($1, $2, $3, $3, $3, $3, $4)
                             ON CONFLICT(pool_address, timestamp)
                             DO UPDATE SET volume = candles_1m.volume + $4
-                        `, [p.address, bucket, priceUsd, flooredVolume]).catch(() => {});
+                        `, [p.address, bucket, priceUsd, flooredVolume])
+                            .catch(err => {
+                                const typedErr = Errors.candleInsert(p.address, '1m', err.message);
+                                logger.warn(`[Snapshotter] ${typedErr.message}`);
+                                // Non-blocking: candle insert failure shouldn't stop the cycle
+                            });
                     }
                 }
-            }).catch(() => {});
+            }).catch(err => {
+                logger.error(`[Snapshotter] Volume tracking retrieval failed for ${p.address}: ${err.message}`);
+                // Non-blocking: volume tracking is async and failure is non-critical
+            });
         }
 
         if (success && priceUsd > 0) {

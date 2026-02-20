@@ -30,6 +30,8 @@ class RPCProvider {
         this.priority = [];
         this.health = getRPCHealth();
         this.initialized = false;
+        this.inflight = new Map(); // Track in-flight requests for deduplication
+        this.dedupStats = { total: 0, deduplicated: 0 }; // Track dedup stats
     }
 
     /**
@@ -67,11 +69,38 @@ class RPCProvider {
     }
 
     /**
-     * Execute a method with automatic failover
+     * Execute a method with automatic failover and deduplication
      */
     async executeWithFallback(method, args, _options = {}) {
         if (!this.initialized) this.initialize();
 
+        // Deduplication: check if identical request is already in flight
+        const cacheKey = `${method}:${JSON.stringify(args)}`;
+        this.dedupStats.total++;
+
+        if (this.inflight.has(cacheKey)) {
+            this.dedupStats.deduplicated++;
+            logger.debug(`[RPCProvider] Deduplicating ${method} (${this.dedupStats.deduplicated}/${this.dedupStats.total})`);
+            return this.inflight.get(cacheKey);
+        }
+
+        // Create a new promise and track it
+        const promise = this._executeRPC(method, args);
+        this.inflight.set(cacheKey, promise);
+
+        try {
+            const result = await promise;
+            return result;
+        } finally {
+            // Clean up after request completes (success or failure)
+            this.inflight.delete(cacheKey);
+        }
+    }
+
+    /**
+     * Internal method: Execute RPC call with failover
+     */
+    async _executeRPC(method, args) {
         const providerErrors = {}; // Track errors by provider for typed error
         const healthyProviders = await this.health.getHealthyProviders(this.priority);
 
@@ -313,6 +342,30 @@ class RPCProvider {
         }
 
         return caps;
+    }
+
+    /**
+     * Get deduplication statistics
+     */
+    getDeduplicationStats() {
+        const savedCalls = this.dedupStats.deduplicated;
+        const totalCalls = this.dedupStats.total;
+        const percentSaved = totalCalls > 0 ? ((savedCalls / totalCalls) * 100).toFixed(1) : '0.0';
+
+        return {
+            totalRequests: totalCalls,
+            deduplicatedRequests: savedCalls,
+            percentSaved: `${percentSaved}%`,
+            inflightCount: this.inflight.size
+        };
+    }
+
+    /**
+     * Reset deduplication statistics
+     */
+    resetDeduplicationStats() {
+        this.dedupStats = { total: 0, deduplicated: 0 };
+        logger.info('[RPCProvider] Deduplication stats reset');
     }
 }
 

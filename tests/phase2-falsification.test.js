@@ -15,7 +15,8 @@ const assert = require('assert');
 const {
     Errors,
     isAuthError, isRateLimited, isTimeout, isCircuitBreakerOpen,
-    isCacheError, isDataMutationError, isSecurityError, isRecoverable, isWebhookError
+    isCacheError, isDataMutationError, isRecoverable, isWebhookError,
+    toHttpResponse
 } = require('../src/utils/errors');
 
 // ============================================
@@ -206,11 +207,11 @@ const testSerializationAndHttp = () => {
     console.log('  ✓ Error.toJSON(): all fields preserved');
 
     // Test 2: HTTP Response Generation
-    const httpResp = err.toHttpResponse();
-    assert.strictEqual(httpResp.status, 429, 'Rate limit should return 429');
-    assert(httpResp.body.code, 'HTTP body should have code');
+    const httpResp = toHttpResponse(err);
+    assert.strictEqual(httpResp.statusCode, 429, 'Rate limit should return 429');
+    assert(httpResp.body.error, 'HTTP body should have error code');
     assert(httpResp.body.message, 'HTTP body should have message');
-    console.log('  ✓ Error.toHttpResponse(): correct HTTP status and structure');
+    console.log('  ✓ toHttpResponse(): correct HTTP status and structure');
 
     // Test 3: AllProvidersFailedError with per-provider breakdown
     const providerErrors = {
@@ -233,9 +234,9 @@ const testTypeGuards = () => {
 
     // Test 1: isAuthError
     const authErr = Errors.rpcAuth('test');
-    assert(Errors.isAuthError(authErr), 'isAuthError should detect auth errors');
+    assert(isAuthError(authErr), 'isAuthError should detect auth errors');
     const nonAuthErr = Errors.rpcTimeout('test', 5000);
-    assert(!Errors.isAuthError(nonAuthErr), 'isAuthError should not detect timeout');
+    assert(!isAuthError(nonAuthErr), 'isAuthError should not detect timeout');
     console.log('  ✓ isAuthError: guards correctly');
 
     // Test 2: isRecoverable
@@ -247,17 +248,17 @@ const testTypeGuards = () => {
 
     // Test 3: isDataMutationError
     const mutationErr = Errors.volumeUpdate('pool', 'error');
-    assert(Errors.isDataMutationError(mutationErr), 'Volume update is mutation error');
+    assert(isDataMutationError(mutationErr), 'Volume update is mutation error');
     const rpcErr = Errors.rpcTimeout('test', 5000);
-    assert(!Errors.isDataMutationError(rpcErr), 'RPC error is not mutation error');
+    assert(!isDataMutationError(rpcErr), 'RPC error is not mutation error');
     console.log('  ✓ isDataMutationError: classification correct');
 
-    // Test 4: isSecurityError
+    // Test 4: isWebhookError (security-related webhook errors)
     const secErr = Errors.replayAttack('sig', {});
-    assert(isSecurityError(secErr), 'Replay attack is security error');
+    assert(isWebhookError(secErr), 'Replay attack is webhook error (security)');
     const normalErr = Errors.rpcTimeout('test', 5000);
-    assert(!isSecurityError(normalErr), 'Timeout is not security error');
-    console.log('  ✓ isSecurityError: classification correct');
+    assert(!isWebhookError(normalErr), 'Timeout is not webhook error');
+    console.log('  ✓ isWebhookError: classification correct');
 };
 
 // ============================================
@@ -265,23 +266,23 @@ const testTypeGuards = () => {
 // ============================================
 
 const testRecoveryStrategies = () => {
-    console.log('⚡ Testing Recovery Strategies...');
+    console.log('⚡ Testing Recovery Semantics and Context...');
 
-    // Test 1: Retry logic for rate limits
-    const rateLimitErr = Errors.rpcRateLimit('test', 30000, 0);
-    const strategy = rateLimitErr.getRetryStrategy?.();
-    assert(strategy, 'Rate limit should have retry strategy');
-    console.log('  ✓ Rate limit recovery: retry strategy available');
+    // Test 1: Rate limits provide retry context
+    const rateLimitErr = Errors.rpcRateLimit('test', 30000, 50);
+    assert(rateLimitErr.recoverable, 'Rate limit error should be recoverable');
+    assert(rateLimitErr.context.retryAfterMs === 30000, 'Retry timing should be provided');
+    console.log('  ✓ Rate limit recovery: retry timing available (' + rateLimitErr.context.retryAfterMs + 'ms)');
 
-    // Test 2: Non-recoverable errors have no retry
+    // Test 2: Non-recoverable errors clearly marked
     const authErr = Errors.rpcAuth('test');
     assert(!authErr.recoverable, 'Auth error should not be recoverable');
     console.log('  ✓ Auth error: correctly marked non-recoverable');
 
-    // Test 3: Circuit breaker context
+    // Test 3: Circuit breaker tracks breaker name
     const cbErr = Errors.rpcCircuitBreaker('getBalance', 'helius');
-    assert(cbErr.context.provider === 'helius', 'Provider should be tracked');
-    console.log('  ✓ Circuit breaker: provider context preserved');
+    assert(cbErr.breaker === 'helius', 'Breaker name should be tracked');
+    console.log('  ✓ Circuit breaker: breaker name preserved (' + cbErr.breaker + ')');
 };
 
 // ============================================

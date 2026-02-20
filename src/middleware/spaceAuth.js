@@ -16,6 +16,7 @@ const { getDB } = require('../services/database');
 const { getClient } = require('../services/redis');
 const logger = require('../services/logger');
 const config = require('../config/env');
+const { Errors } = require('../utils/errors');
 
 // ═══════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -202,7 +203,7 @@ async function createGrant(wallet, grants, grantedBy, reason = null) {
     // Validate grants
     for (const g of grants) {
         if (!VALID_GRANTS.includes(g)) {
-            throw new Error(`Invalid grant type: ${g}`);
+            throw Errors.invalidSignature(wallet, `Invalid grant type: ${g}`);
         }
     }
 
@@ -255,13 +256,13 @@ async function revokeGrant(wallet, revokedBy) {
 async function createSession(wallet, signedMessage, signature) {
     // Verify wallet signature
     if (!verifyWalletSignature(wallet, signedMessage, signature)) {
-        throw new Error('Invalid wallet signature');
+        throw Errors.walletSignatureInvalid(wallet, 'signature verification failed');
     }
 
     // Parse timestamp from message (format: "Access HolDex Space: [timestamp]")
     const match = signedMessage.match(/: (\d+)$/);
     if (!match) {
-        throw new Error('Invalid message format');
+        throw Errors.walletSignatureInvalid(wallet, 'invalid message format');
     }
 
     const timestamp = parseInt(match[1]);
@@ -269,7 +270,7 @@ async function createSession(wallet, signedMessage, signature) {
 
     // Check message freshness (prevent replay)
     if (now - timestamp > SIGNATURE_MAX_AGE_MS) {
-        throw new Error('Signature expired');
+        throw Errors.signatureExpired(wallet);
     }
 
     const db = getDB();

@@ -20,6 +20,7 @@ const newTokenWebhook = require('../services/newTokenWebhook');
 const { queueNewToken, promoteToQueue } = require('../services/tokenQueue');
 const signalAccumulator = require('../services/signalAccumulator');
 const { tokenExists } = require('../services/database');
+const { Errors, isWebhookError } = require('../utils/errors');
 
 // ============================================
 // RATE LIMITING - Prevent webhook amplification attacks
@@ -282,16 +283,26 @@ function validateTransfer(transfer) {
 
 /**
  * Check if signature was already processed (Redis-backed, cluster-safe)
- * Returns true if duplicate, false if new
+ * Throws ReplayAttackError if duplicate, returns null if new or Redis unavailable
  */
 async function checkAndMarkProcessed(signature) {
     const redis = getClient();
-    if (!redis) return false; // Allow if Redis down (degrade gracefully)
+    if (!redis) return null; // Allow if Redis down (degrade gracefully)
 
     const key = `webhook:sig:${signature}`;
-    // SETNX returns 1 if key was set (new), 0 if already exists (duplicate)
-    const isNew = await redis.set(key, '1', 'EX', REPLAY_WINDOW_SECONDS, 'NX');
-    return !isNew; // Return true if duplicate
+    try {
+        // SETNX returns 1 if key was set (new), 0 if already exists (duplicate)
+        const isNew = await redis.set(key, '1', 'EX', REPLAY_WINDOW_SECONDS, 'NX');
+        if (!isNew) {
+            // This is a duplicate - throw typed error for visibility
+            throw Errors.replayAttack(signature, 'Signature already processed within replay window');
+        }
+        return null; // New signature, safe to process
+    } catch (err) {
+        if (isWebhookError(err)) throw err; // Re-throw typed errors
+        logger.warn(`[Webhook] Replay check error for ${signature.slice(0, 8)}...: ${err.message}`);
+        return null; // Degrade gracefully on Redis errors
+    }
 }
 
 let db = null;
@@ -331,8 +342,9 @@ function init(deps) {
 
                 if (!authHeader) {
                     // SECURITY: Reject requests without auth when secret is configured
-                    logger.warn('⚠️  Webhook request rejected - no auth header');
-                    return res.status(401).json({ error: 'Authorization required' });
+                    const err = Errors.webhookAuth('Missing authorization header');
+                    logger.warn(`⚠️  Webhook auth failed: ${err.message}`);
+                    return res.status(401).json({ error: err.code, message: err.message });
                 }
 
                 // Constant-time comparison to prevent timing attacks
@@ -341,8 +353,9 @@ function init(deps) {
 
                 if (expected.length !== received.length ||
                     !require('crypto').timingSafeEqual(expected, received)) {
-                    logger.warn('⚠️  Webhook auth mismatch');
-                    return res.status(401).json({ error: 'Unauthorized' });
+                    const err = Errors.webhookAuth('Authorization header mismatch');
+                    logger.warn(`⚠️  Webhook auth failed: ${err.message}`);
+                    return res.status(401).json({ error: err.code, message: err.message });
                 }
                 // Auth verified - continue processing
             } else if (process.env.NODE_ENV === 'production') {
@@ -403,10 +416,18 @@ function init(deps) {
                 // ============================================
                 const txSignature = event.signature;
                 if (txSignature) {
-                    // Check if already processed (atomic Redis SETNX)
-                    if (await checkAndMarkProcessed(txSignature)) {
-                        skipped++;
-                        continue;
+                    try {
+                        // Check if already processed (atomic Redis SETNX)
+                        // Throws ReplayAttackError if duplicate
+                        await checkAndMarkProcessed(txSignature);
+                    } catch (err) {
+                        if (isWebhookError(err)) {
+                            logger.warn(`[Webhook] Replay attack detected: ${err.message}`);
+                            // Log the replay attack but don't crash - just skip this event
+                            skipped++;
+                            continue;
+                        }
+                        throw err; // Re-throw non-webhook errors
                     }
                 }
 
@@ -528,7 +549,12 @@ function init(deps) {
                             },
                             source: 'helius_webhook',
                             metadata: { timestamp: event.timestamp }
-                        }).catch(_e => {}); // Ignore audit failures
+                        }).catch(err => {
+                            // Audit trail failure is concerning but non-blocking
+                            // Log with typed error for visibility and monitoring
+                            const auditErr = Errors.auditTrail(err.message);
+                            logger.warn(`[Webhook] ${auditErr.message}`);
+                        });
                     }
 
                     processed++;

@@ -22,6 +22,7 @@ const { getRPCHealth } = require('./rpcHealth');
 const { waitForRateLimit } = require('./heliusRateLimiter');
 const HeliusProvider = require('./providers/helius');
 const PublicProvider = require('./providers/public');
+const { Errors } = require('../utils/errors');
 
 class RPCProvider {
     constructor() {
@@ -71,7 +72,7 @@ class RPCProvider {
     async executeWithFallback(method, args, _options = {}) {
         if (!this.initialized) this.initialize();
 
-        const errors = [];
+        const providerErrors = {}; // Track errors by provider for typed error
         const healthyProviders = await this.health.getHealthyProviders(this.priority);
 
         if (healthyProviders.length === 0) {
@@ -87,6 +88,9 @@ class RPCProvider {
 
             // Check if provider supports this method
             if (typeof provider[method] !== 'function') {
+                // Record that provider doesn't support this method
+                providerErrors[providerId] = { message: `Method ${method} not supported`, code: 'NOT_SUPPORTED' };
+                logger.debug(`[RPCProvider] ${method} not supported by ${providerId}`);
                 continue;
             }
 
@@ -112,14 +116,13 @@ class RPCProvider {
 
             } catch (e) {
                 await this.health.recordFailure(providerId, e);
-                errors.push({ provider: providerId, error: e.message });
+                providerErrors[providerId] = { message: e.message, code: e.code || 'RPC_ERROR' };
                 logger.debug(`[RPCProvider] ${method} failed on ${providerId}: ${e.message}`);
             }
         }
 
-        // All failed
-        const errorSummary = errors.map(e => `${e.provider}: ${e.error}`).join('; ');
-        throw new Error(`All RPC providers failed for ${method}: ${errorSummary}`);
+        // All providers failed - use typed error with detailed per-provider breakdown
+        throw Errors.allProvidersFailed(method, providerErrors);
     }
 
     // ============================================
